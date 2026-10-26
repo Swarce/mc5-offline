@@ -2,6 +2,18 @@
 
 Device-test history and the current state. Newest first.
 
+## October 2026: M0.5 diagnostics (host-verified, no device yet)
+
+* `hosts/embedded/diag.{hpp,cpp}` — [diagnostics.md](diagnostics.md). Boot trace
+  (`[boot +Nms]` milestones from load to hooks), native crash reporter (SEGV/ABRT/BUS/ILL/FPE
+  on a sigaltstack, async-signal-safe `module+offset` backtrace resolved from `/proc/self/maps`,
+  then chains to the platform handler), watchdog (heartbeat + periodic thread-state dump), and a
+  phone-readable `mc5offline.log` copy (external files dir preferred, `adb pull`-able). Installed
+  at `JNI_OnLoad`, before the server, so startup crashes are still caught.
+* Host-tested under ctest (`tests/test_diag.cpp`): a child faults, and the handler emits the
+  crash line and a resolved backtrace (`libMC5.so +0xNNNNNN` → Ghidra addr = offset + 0x100000).
+  Both ABIs build clean. M0 is now code-complete and awaiting the device test.
+
 ## October 2026: M0.4 patcher (host-verified, no device yet)
 
 * `patcher/` (Java/Gradle, dexlib2) turns the player's own split set into a re-signed,

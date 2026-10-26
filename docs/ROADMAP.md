@@ -24,5 +24,5 @@ Done items are struck through. Details and evidence: [research/00-recon.md](rese
 - ~~M0.2 `libmc5offline.so` via NDK + JNI/C bootstrap~~
 - ~~M0.3 native GOT hooks + in-memory libMC5 http patches~~ ([patches.md](patches.md))
 - ~~M0.4 patcher: split set + lib load + local asset packs + re-sign~~ ([patcher.md](patcher.md)) — host-verified, not yet on device
-- M0.5 diagnostics: boot trace, native crash reporter, game-thread watchdog, phone-readable log copy
-- M0 device test: patched APK boots past the installer with local assets, reaches login/loading, every request logged
+- ~~M0.5 diagnostics: boot trace, native crash reporter, watchdog, phone-readable log copy~~ ([diagnostics.md](diagnostics.md)) — host-verified
+- **M0 device test** (owner, on the S22): patched APK boots past the installer with local assets, reaches login/loading, every request logged. This is the first on-device run and the one step this session cannot do.

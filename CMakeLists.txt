@@ -35,7 +35,7 @@ target_link_libraries(mc5hook PUBLIC ${CMAKE_DL_LIBS})
 if(ANDROID)
   # Embedded build: libmc5offline.so, loaded inside the game process. Same server
   # tree, plus the JNI/C bootstrap. Links liblog (logcat) and libandroid.
-  add_library(mc5offline SHARED hosts/embedded/bootstrap.cpp hosts/embedded/redirect.cpp hosts/embedded/patch.cpp)
+  add_library(mc5offline SHARED hosts/embedded/bootstrap.cpp hosts/embedded/redirect.cpp hosts/embedded/patch.cpp hosts/embedded/diag.cpp)
   target_link_libraries(mc5offline PRIVATE mc5server mc5hook log android)
   # Keep the C/JNI entry points; strip the rest for a small library.
   target_link_options(mc5offline PRIVATE -Wl,--exclude-libs,ALL)
@@ -60,7 +60,13 @@ if(NOT ANDROID)
   target_compile_definitions(test_gothook PRIVATE VICTIM_PATH="$<TARGET_FILE:victim>")
   add_dependencies(test_gothook victim)
 
+  # Diagnostics crash reporter (diag.cpp is portable Linux; tested on the host).
+  add_executable(test_diag tests/test_diag.cpp hosts/embedded/diag.cpp)
+  target_include_directories(test_diag PRIVATE ${CMAKE_SOURCE_DIR})
+  target_link_libraries(test_diag PRIVATE Threads::Threads)
+
   add_test(NAME json COMMAND test_json)
   add_test(NAME router COMMAND test_router)
   add_test(NAME gothook COMMAND test_gothook)
+  add_test(NAME diag COMMAND test_diag)
 endif()

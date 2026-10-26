@@ -21,6 +21,7 @@
 #include "../../server/core/log.hpp"
 #include "../../server/core/server.hpp"
 #include "../../server/services/services.hpp"
+#include "diag.hpp"
 #include "redirect.hpp"
 
 namespace {
@@ -32,6 +33,10 @@ std::atomic<bool> g_started{false};
 
 void start_locked(const std::string& data_dir) {
     if (g_started.load()) return;
+
+    // Diagnostics first, so a crash during server/hook setup is still reported.
+    mc5::diag::init(data_dir);
+    mc5::diag::boot_trace("server starting");
 
     g_ctx = std::make_unique<mc5::ServerContext>();
     // Embedded build serves the game over loopback. TLS (scheme https) is wired in
@@ -50,6 +55,8 @@ void start_locked(const std::string& data_dir) {
         g_started.store(true);
         mc5::logi("libmc5offline: server started on %s (data_dir=%s)",
                   g_ctx->base_url().c_str(), data_dir.empty() ? "(default)" : data_dir.c_str());
+        mc5::diag::boot_trace("server started");
+        mc5::diag::dump_threads("after server start");
         // Redirect libMC5's Gaia traffic to us once the game loads it. TLS port is
         // wired next; until then the https path is redirected but not yet served.
         mc5::start_redirect_installer(g_ctx->port, g_ctx->port); // no TLS in M0: :443 also lands on http
@@ -82,6 +89,10 @@ Java_com_gameloft_android_ANMP_GloftM5HM_MC5Offline_init(JNIEnv* env, jclass, js
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*, void*) {
+    // Install diagnostics at the earliest possible moment (before the server),
+    // so even a crash during startup is captured.
+    mc5::diag::init(std::string());
+    mc5::diag::boot_trace("JNI_OnLoad");
     mc5::logi("libmc5offline: JNI_OnLoad");
     // Self-start so a bare System.loadLibrary boots the server even before the
     // Java init glue exists. Idempotent with the explicit entry points above.

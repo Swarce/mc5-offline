@@ -34,6 +34,24 @@ public:
     void set_min_level(LogLevel lvl) { min_level_ = lvl; }
     LogLevel min_level() const { return min_level_; }
 
+    // Mirror every line to a file as well (the phone-readable copy). Best-effort:
+    // if the path cannot be opened the logger carries on with logcat/stderr only.
+    void set_logfile(const std::string& path) {
+        std::lock_guard<std::mutex> g(mu_);
+        if (logfile_) { std::fclose(logfile_); logfile_ = nullptr; logfile_fd_ = -1; }
+        logfile_ = std::fopen(path.c_str(), "ae"); // append, close-on-exec
+        if (logfile_) {
+            logfile_path_ = path;
+#if defined(__ANDROID__)
+            logfile_fd_ = fileno(logfile_); // for the crash handler's raw writes
+#endif
+        }
+    }
+    // Raw fd of the log file, for the crash handler's async-signal-safe writes
+    // (-1 if no file is open).
+    int logfile_fd() const { return logfile_fd_; }
+    const std::string& logfile_path() const { return logfile_path_; }
+
     void write(LogLevel lvl, const char* fmt, va_list ap) {
         if (static_cast<int>(lvl) < static_cast<int>(min_level_)) return;
         char buf[2048];
@@ -63,10 +81,7 @@ private:
             case LogLevel::Fatal: prio = ANDROID_LOG_FATAL; break;
         }
         __android_log_write(prio, kTag, msg);
-#else
-        std::time_t t = std::time(nullptr);
-        char ts[32];
-        std::strftime(ts, sizeof(ts), "%H:%M:%S", std::localtime(&t));
+#endif
         const char* lc = "I";
         switch (lvl) {
             case LogLevel::Debug: lc = "D"; break;
@@ -75,10 +90,18 @@ private:
             case LogLevel::Error: lc = "E"; break;
             case LogLevel::Fatal: lc = "F"; break;
         }
+        std::time_t t = std::time(nullptr);
+        char ts[32];
+        std::strftime(ts, sizeof(ts), "%H:%M:%S", std::localtime(&t));
+#if !defined(__ANDROID__)
         std::fprintf(stderr, "%s %s/%s: %s\n", ts, lc, kTag, msg);
         std::fflush(stderr);
 #endif
         std::lock_guard<std::mutex> g(mu_);
+        if (logfile_) {
+            std::fprintf(logfile_, "%s %s/%s: %s\n", ts, lc, kTag, msg);
+            std::fflush(logfile_);
+        }
         ring_.emplace_back(msg);
         if (ring_.size() > kRingCap) ring_.erase(ring_.begin(), ring_.begin() + (ring_.size() - kRingCap));
     }
@@ -87,6 +110,9 @@ private:
     LogLevel min_level_ = LogLevel::Debug;
     mutable std::mutex mu_;
     std::vector<std::string> ring_;
+    std::FILE* logfile_ = nullptr;
+    int logfile_fd_ = -1;
+    std::string logfile_path_;
 };
 
 inline void logd(const char* fmt, ...) { va_list ap; va_start(ap, fmt); Log::instance().write(LogLevel::Debug, fmt, ap); va_end(ap); }

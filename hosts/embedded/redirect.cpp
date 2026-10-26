@@ -14,6 +14,7 @@
 #include <thread>
 
 #include "../../server/core/log.hpp"
+#include "diag.hpp"
 #include "gothook.hpp"
 #include "patch.hpp"
 
@@ -81,16 +82,20 @@ void start_redirect_installer(int http_port, int tls_port) {
         // Our library loads before the game loads libMC5; wait for it to appear.
         for (int i = 0; i < 6000; ++i) { // up to ~60s at 10ms (patch before Gaia init)
             if (so_loaded("libMC5.so")) {
+                diag::boot_trace("libMC5.so loaded");
                 // Repoint the eve URL to our http server and neutralise the scheme
                 // rewrite (M0 transport: plain http on loopback, no TLS).
                 apply_libmc5_http_patches(g_http_port.load());
+                diag::boot_trace("libMC5 http patches applied");
                 // Backstop for any host not reached through our returned URLs.
                 install_now();
+                diag::boot_trace("GOT hooks installed");
                 return;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         logw("redirect: libMC5.so not seen within timeout; hooks not installed");
+        diag::boot_trace("libMC5.so NOT seen within timeout");
     }).detach();
 }
 
