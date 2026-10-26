@@ -1,0 +1,43 @@
+# Build outputs
+artifacts/
+build/
+bin/
+obj/
+.cxx/
+.gradle/
+local.properties
+*.o
+*.a
+
+# Runtime data of a local standalone host (settings, accounts, profiles, logs)
+/data/
+*.log
+*.jsonl
+
+# Never commit Gameloft binaries, game data, decompiled sources or anything derived from them.
+*.apk
+*.apks
+*.xapk
+*.aab
+*.obb
+*.so
+*.dex
+*.dat
+*.dlc
+*.pak
+extracted/
+decompiled/
+decompiled-java/
+ghidra/
+assetpacks/
+captures/
+
+# Python tool caches
+__pycache__/
+*.pyc
+
+# Signing keys: the patcher creates the player's private key wherever --keystore points
+*.p12
+*.pfx
+*.jks
+*.keystore
