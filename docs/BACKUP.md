@@ -32,9 +32,12 @@ asset packs and the local save. **Do every step below while the Play version is 
    gplaydl download com.gameloft.android.ANMP.GloftM5HM -a arm64 -o mc5-play
    gplaydl download com.gameloft.android.ANMP.GloftM5HM -a armv7 -o mc5-play-armv7   # 32-bit splits, optional
    ```
-   Check that the output has five asset-pack files (named like `...-asset.apk`) next to the base and config splits, and
-   write down the list of file names and sizes. If gplaydl cannot get them, tell me before the shutdown; the only other
-   way is a rooted phone.
+   **Tested 2026-10-26:** gplaydl 4.2.1 fetches the base and config splits (byte-identical to the Play install) but
+   **not** these packs, because they are fast-follow/on-demand packs. Play serves those through a separate request,
+   `POST https://play-fe.googleapis.com/fdfe/assetModuleDelivery` (the request microG's Play Store replacement
+   sends), which returns each pack's slices (`assetPack_HighSlowN` plus `assetPack_HighSlowN.config.astc` on ASTC
+   devices) as SHA-256-checked gzip chunks. With gplaydl's linked account that request worked: 1.15 GB download,
+   1.45 GB unpacked, all ten slices verified. A small tool for this is planned (`tools/play-assets`).
 2. **APK splits.** Already provided (`base.apk`, `split_config.arm64_v8a.apk`, `split_config.xxhdpi.apk`). Keep the
    gplaydl copies too.
 3. **OBB folder**: `adb pull /sdcard/Android/obb/com.gameloft.android.ANMP.GloftM5HM/ mc5-obb/`
