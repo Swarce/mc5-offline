@@ -52,7 +52,7 @@ void start_locked(const std::string& data_dir) {
                   g_ctx->base_url().c_str(), data_dir.empty() ? "(default)" : data_dir.c_str());
         // Redirect libMC5's Gaia traffic to us once the game loads it. TLS port is
         // wired next; until then the https path is redirected but not yet served.
-        mc5::start_redirect_installer(g_ctx->port, 51443);
+        mc5::start_redirect_installer(g_ctx->port, g_ctx->port); // no TLS in M0: :443 also lands on http
     } else {
         mc5::loge("libmc5offline: server failed to start");
         g_server.reset();

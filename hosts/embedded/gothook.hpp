@@ -18,6 +18,11 @@ namespace mc5 {
 // loaded in the process.
 bool so_loaded(const char* so_substr);
 
+// Runtime load base (bias) of the first loaded object whose path contains
+// `so_substr`, or 0 if not found. Add an ELF vaddr to this to get the in-memory
+// address of that byte.
+unsigned long so_base(const char* so_substr);
+
 // Overwrite the GOT slot for imported `symbol` in every loaded shared object whose
 // path contains `so_substr`, repointing it at `replacement`. If `out_original` is
 // non-null it receives the previous target the first time the symbol is found.

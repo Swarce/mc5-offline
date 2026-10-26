@@ -134,13 +134,14 @@ struct HookCtx {
     int patched;
     bool only_presence; // for so_loaded()
     bool present;
+    uintptr_t base;     // for so_base()
 };
 
 int iterate_cb(dl_phdr_info* info, size_t, void* data) {
     auto* ctx = static_cast<HookCtx*>(data);
     const char* name = info->dlpi_name ? info->dlpi_name : "";
     if (!std::strstr(name, ctx->so_substr)) return 0;
-    if (ctx->only_presence) { ctx->present = true; return 1; }
+    if (ctx->only_presence) { ctx->present = true; ctx->base = info->dlpi_addr; return 1; }
 
     DynInfo di;
     if (!read_dynamic(info, di)) return 0;
@@ -155,13 +156,19 @@ int iterate_cb(dl_phdr_info* info, size_t, void* data) {
 } // namespace
 
 bool so_loaded(const char* so_substr) {
-    HookCtx ctx{so_substr, nullptr, nullptr, nullptr, 0, true, false};
+    HookCtx ctx{so_substr, nullptr, nullptr, nullptr, 0, true, false, 0};
     dl_iterate_phdr(iterate_cb, &ctx);
     return ctx.present;
 }
 
+unsigned long so_base(const char* so_substr) {
+    HookCtx ctx{so_substr, nullptr, nullptr, nullptr, 0, true, false, 0};
+    dl_iterate_phdr(iterate_cb, &ctx);
+    return ctx.present ? static_cast<unsigned long>(ctx.base) : 0;
+}
+
 int got_hook(const char* so_substr, const char* symbol, void* replacement, void** out_original) {
-    HookCtx ctx{so_substr, symbol, replacement, out_original, 0, false, false};
+    HookCtx ctx{so_substr, symbol, replacement, out_original, 0, false, false, 0};
     dl_iterate_phdr(iterate_cb, &ctx);
     return ctx.patched;
 }

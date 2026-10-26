@@ -35,7 +35,7 @@ target_link_libraries(mc5hook PUBLIC ${CMAKE_DL_LIBS})
 if(ANDROID)
   # Embedded build: libmc5offline.so, loaded inside the game process. Same server
   # tree, plus the JNI/C bootstrap. Links liblog (logcat) and libandroid.
-  add_library(mc5offline SHARED hosts/embedded/bootstrap.cpp hosts/embedded/redirect.cpp)
+  add_library(mc5offline SHARED hosts/embedded/bootstrap.cpp hosts/embedded/redirect.cpp hosts/embedded/patch.cpp)
   target_link_libraries(mc5offline PRIVATE mc5server mc5hook log android)
   # Keep the C/JNI entry points; strip the rest for a small library.
   target_link_options(mc5offline PRIVATE -Wl,--exclude-libs,ALL)

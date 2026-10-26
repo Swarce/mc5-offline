@@ -2,6 +2,16 @@
 
 Device-test history and the current state. Newest first.
 
+## October 2026: M0.2/M0.3 embedded library + redirect (no device yet)
+
+* `libmc5offline.so` cross-compiles for arm64-v8a and armeabi-v7a (NDK r26d, c++_static);
+  JNI_OnLoad/`mc5offline_start`/injected-`init`; self-starts the server on load.
+* GOT/PLT hook engine redirects libMC5's `getaddrinfo`/`connect` to loopback (unit-tested
+  on the host with a victim library). Transport decision (owner): plain HTTP on loopback via
+  two fingerprint-verified in-memory patches to the loaded libMC5 (eve URL + scheme rewrite,
+  arm64), leaving the on-disk .so byte-identical — no TLS stack ([patches.md](patches.md)).
+* Both ABIs build; host unit tests pass. Not yet device-tested (needs the patcher, M0.4).
+
 ## October 2026: M0.1 server core (desktop, no device yet)
 
 * The Federation server builds and runs on the desktop (`server/`, one C++17 tree, no
