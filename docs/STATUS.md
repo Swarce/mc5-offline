@@ -2,6 +2,17 @@
 
 Device-test history and the current state. Newest first.
 
+## October 2026: M0.1 server core (desktop, no device yet)
+
+* The Federation server builds and runs on the desktop (`server/`, one C++17 tree, no
+  third-party deps). The boot discovery + auth chain answers: eve datacenters/urls,
+  pandora locate, auth authorize/users/me/verify/encrypt_token, plus a catch-all that
+  logs every unknown request and answers `200 {}`. Account ids are `sha1(credential)[:24]`;
+  tokens are self-describing. Unit tests (JSON, router) pass; the chain is verified with curl.
+* Build/run: [DEV-LOOP.md](DEV-LOOP.md).
+* Next in M0: cross-compile the same tree to `libmc5offline.so` (NDK), native GOT hooks +
+  loopback TLS, the patcher, and diagnostics.
+
 ## October 2026: Phase 1b (analysis only)
 
 * [research/01-phase1b.md](research/01-phase1b.md): no local-profile mode; the profile is a JSON document pushed by
