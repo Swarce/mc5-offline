@@ -21,6 +21,7 @@
 #include "../../server/core/log.hpp"
 #include "../../server/core/server.hpp"
 #include "../../server/services/services.hpp"
+#include "redirect.hpp"
 
 namespace {
 
@@ -49,6 +50,9 @@ void start_locked(const std::string& data_dir) {
         g_started.store(true);
         mc5::logi("libmc5offline: server started on %s (data_dir=%s)",
                   g_ctx->base_url().c_str(), data_dir.empty() ? "(default)" : data_dir.c_str());
+        // Redirect libMC5's Gaia traffic to us once the game loads it. TLS port is
+        // wired next; until then the https path is redirected but not yet served.
+        mc5::start_redirect_installer(g_ctx->port, 51443);
     } else {
         mc5::loge("libmc5offline: server failed to start");
         g_server.reset();
