@@ -45,3 +45,7 @@ __pycache__/
 # C/C++ build
 /build/
 /build-android/
+
+# Patcher build output (Gradle)
+patcher/build/
+patcher/.gradle/

@@ -17,3 +17,12 @@ Done items are struck through. Details and evidence: [research/00-recon.md](rese
 | M2 | Bot or solo matches: Anubis lobby/controller, a GS that relays and runs the room lifecycle; the local client holds the authority role and runs the bots. First task: find how the role is assigned |
 | M3 | LAN: one phone hosts, others join |
 | M4 | Internet: desktop/VPS server build, cross-device accounts, optional relay |
+
+### M0 breakdown
+
+- ~~M0.1 server core + eve/pandora/auth (desktop)~~ ([DEV-LOOP.md](DEV-LOOP.md))
+- ~~M0.2 `libmc5offline.so` via NDK + JNI/C bootstrap~~
+- ~~M0.3 native GOT hooks + in-memory libMC5 http patches~~ ([patches.md](patches.md))
+- ~~M0.4 patcher: split set + lib load + local asset packs + re-sign~~ ([patcher.md](patcher.md)) — host-verified, not yet on device
+- M0.5 diagnostics: boot trace, native crash reporter, game-thread watchdog, phone-readable log copy
+- M0 device test: patched APK boots past the installer with local assets, reaches login/loading, every request logged

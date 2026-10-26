@@ -2,6 +2,22 @@
 
 Device-test history and the current state. Newest first.
 
+## October 2026: M0.4 patcher (host-verified, no device yet)
+
+* `patcher/` (Java/Gradle, dexlib2) turns the player's own split set into a re-signed,
+  offline-ready set — [patcher.md](patcher.md). One structural dex edit makes
+  `FrameworkApplication.attachBaseContext` load `libmc5offline.so` first (via an injected
+  `MC5Offline.boot()`); `libmc5offline.so` is added to each ABI split uncompressed +
+  page-aligned (the app is `extractNativeLibs=false`); every APK (base, ABI/density splits,
+  asset packs) is re-signed with one player key and `apksigner verify`ed, so
+  `install-multiple` accepts the set. Base identity is fingerprinted first; `--dry-run` and
+  `--force` provided.
+* Verified on the real 601213 base + arm64 split + xxhdpi + an asset pack: injected
+  bytecode disassembles correctly (boot() = `loadLibrary("mc5offline")`, called as
+  instruction 0 of attachBaseContext); `.so` present, STORED, page-aligned; one shared
+  signer cert across all outputs; whole-archive alignment check passes. Not yet installed on
+  a device — that is the end-of-M0 test (needs M0.5 diagnostics first).
+
 ## October 2026: M0.2/M0.3 embedded library + redirect (no device yet)
 
 * `libmc5offline.so` cross-compiles for arm64-v8a and armeabi-v7a (NDK r26d, c++_static);

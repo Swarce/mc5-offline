@@ -1,0 +1,37 @@
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // dexlib2 for the one surgical dex edit (org.jf.* package). 2.5.2 is the last
+    // release under org.smali on Maven Central; the newer com.android.tools.smali
+    // line lives only on Google's Maven repo. API is identical for our use.
+    implementation 'org.smali:dexlib2:2.5.2'
+    // dexlib2's immutable/writer APIs expose guava collection types, so guava must
+    // be on the compile classpath explicitly (it also comes in transitively).
+    implementation 'com.google.guava:guava:32.1.3-jre'
+}
+
+java {
+    // Compile to 17 bytecode with whatever JDK runs Gradle (no toolchain download).
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+// Single runnable fat jar: build/libs/mc5-patcher.jar
+jar {
+    archiveBaseName = 'mc5-patcher'
+    archiveVersion = ''
+    manifest {
+        attributes 'Main-Class': 'org.mc5offline.patcher.MC5Patch'
+    }
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'module-info.class'
+}
