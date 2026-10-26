@@ -44,3 +44,4 @@ __pycache__/
 
 # C/C++ build
 /build/
+/build-android/

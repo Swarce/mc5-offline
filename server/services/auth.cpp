@@ -87,10 +87,10 @@ void register_auth(Router& router, ServerContext& ctx) {
 
     // encrypt_token: returns the (encrypted) token for a nonce. We return the token
     // unchanged as plain text; the Anubis login forwards it to verify.
-    router.add("GET", "encrypt_token", [&ctx](const Request& r) {
+    router.add("GET", "encrypt_token", [](const Request& r) {
         return Response::text(r.value("access_token"));
     });
-    router.add("POST", "encrypt_token", [&ctx](const Request& r) {
+    router.add("POST", "encrypt_token", [](const Request& r) {
         return Response::text(r.value("access_token"));
     });
 

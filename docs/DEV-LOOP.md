@@ -49,6 +49,22 @@ route unprefixed (`/authorize`) both resolve. Account ids are `sha1(credential)[
 Anything not yet implemented is logged in full by the catch-all and answered `200 {}`,
 so the first device boot shows exactly what to build next.
 
+## Embedded build (libmc5offline.so)
+
+The same tree cross-compiles to the in-process library with the Android NDK:
+
+```sh
+ANDROID_NDK=/path/to/android-ndk scripts/build-android.sh           # arm64-v8a + armeabi-v7a
+ANDROID_NDK=/path/to/android-ndk scripts/build-android.sh arm64-v8a # one ABI
+```
+
+Output: `artifacts/lib/<abi>/libmc5offline.so` (built against `android-24`, `c++_static`,
+so it needs only liblog/libandroid/libc — no `libc++_shared`). It exports
+`JNI_OnLoad`, `mc5offline_start(const char* data_dir)` (for the native hook/patcher)
+and `Java_..._MC5Offline_init` (for injected Java glue), and self-starts the server on
+load. The patcher (M0.4) places it in the APK and makes the game load it; the native
+hooks and loopback TLS that make the game talk to it are M0.3.
+
 ## Device dev loop (later)
 
 MC5 has no `args.txt`-style redirect (that was MCVS's Xamarin launcher). To point the

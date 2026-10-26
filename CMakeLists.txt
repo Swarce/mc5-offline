@@ -27,13 +27,24 @@ add_library(mc5server STATIC
 target_include_directories(mc5server PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(mc5server PUBLIC Threads::Threads)
 
-# Desktop standalone host (dev loop, LAN/VPS host later).
-add_executable(mc5-offline-standalone hosts/standalone/main.cpp)
-target_link_libraries(mc5-offline-standalone PRIVATE mc5server)
+if(ANDROID)
+  # Embedded build: libmc5offline.so, loaded inside the game process. Same server
+  # tree, plus the JNI/C bootstrap. Links liblog (logcat) and libandroid.
+  add_library(mc5offline SHARED hosts/embedded/bootstrap.cpp)
+  target_link_libraries(mc5offline PRIVATE mc5server log android)
+  # Keep the C/JNI entry points; strip the rest for a small library.
+  target_link_options(mc5offline PRIVATE -Wl,--exclude-libs,ALL)
+else()
+  # Desktop standalone host (dev loop, LAN/VPS host later).
+  add_executable(mc5-offline-standalone hosts/standalone/main.cpp)
+  target_link_libraries(mc5-offline-standalone PRIVATE mc5server)
+endif()
 
-enable_testing()
-add_executable(test_json tests/test_json.cpp)
-add_executable(test_router tests/test_router.cpp)
-target_link_libraries(test_router PRIVATE mc5server)
-add_test(NAME json COMMAND test_json)
-add_test(NAME router COMMAND test_router)
+if(NOT ANDROID)
+  enable_testing()
+  add_executable(test_json tests/test_json.cpp)
+  add_executable(test_router tests/test_router.cpp)
+  target_link_libraries(test_router PRIVATE mc5server)
+  add_test(NAME json COMMAND test_json)
+  add_test(NAME router COMMAND test_router)
+endif()
