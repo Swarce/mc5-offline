@@ -1,4 +1,4 @@
-# Architecture (proposed, not approved yet)
+# Architecture (approved direction, October 2026)
 
 The full proposal with the evidence behind it is in [research/00-recon.md](research/00-recon.md) §6. Summary:
 
