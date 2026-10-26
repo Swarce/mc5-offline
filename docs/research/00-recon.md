@@ -119,7 +119,7 @@ endpoint are **open** (Phase 1b):
   `GUEST_TIME_LIMIT_EXCEEDED`) [V strings]; we answer permissively.
 
 **Working assumption [L]:** without the backend the campaign cannot load the profile, so even single-player needs
-our game server's meta channel, not just Federation.
+our game server's meta channel, not just Federation. Confirmed in [01-phase1b.md](01-phase1b.md) §1-2: there is no local-profile mode, and the profile is a JSON document the TS sends.
 
 ## 3. Multiplayer architecture (the key question)
 
@@ -156,25 +156,19 @@ our game server's meta channel, not just Federation.
 
 ### 3.3 Authority, bots and host code
 
-* **Authority model: open.** The server sends world-state lists (positions, entities, snapshots: `SnapShot`,
-  `RequestAgainSnapshot`), level files and configuration. Whether hits and damage are decided by the server or
-  claimed by clients is the main Phase 1b question.
-* **Bots:** the matchmaker takes `&_botsOnly=` (G:0xce70a8) and the client creates `bot_credentials_%d`
-  (G:0xc42270); the client also has debug code that spawns MP bots with an `mpId` and `UpdateBotPlayers`
-  (G:0xc41a80) [V strings]. Whether bot AI runs on the server or on a client is **open**. If a client drives bots,
-  bot matches are much cheaper for us.
-* **No listen-server or LAN host code was found [L].** `MultiplayerCreateLocal`, `JoinLocal`, `SearchLocalGame`
-  and `LeaveLocalSearchingGame` are strings with no code references (leftovers from MC4); `StartLocalGame` is only
-  reused as the UI event that starts an ordinary match (G:0x9eb990, G:0x937588) [V]. The `listen`/`accept` callers
-  are curl and the debug remote controller [L].
+* **Authority model (answered in Phase 1b, [01-phase1b.md](01-phase1b.md) §5):** the match rules run in the
+  client's shared match code whenever a peer holds an authority role (G:0xbc02c0, 361 callers); the role holder
+  decides and broadcasts, the others apply. Clients build the same 221 message types they receive.
+* **Bots (answered in Phase 1b):** the client's bot manager (G:0xc41a80) creates and removes bot players with
+  `bot_credentials_%d` identities (G:0xc42270); the matchmaker takes `&_botsOnly=` (G:0xce70a8).
+* **No LAN menu code [V], but host logic exists.** `MultiplayerCreateLocal`, `JoinLocal`, `SearchLocalGame` and
+  `LeaveLocalSearchingGame` are strings with no code references (leftovers from MC4); `StartLocalGame` is only
+  reused as the UI event that starts an ordinary match (G:0x9eb990, G:0x937588) [V]. The authority/relay role above
+  is the part that matters for hosting (corrected in Phase 1b; this note first said no host code existed).
 
-**What our game server must reimplement:** the Anubis lobby/controller, the meta channel (profile, inventory,
-economy, tournaments, config files), and the match server (match flow, world-state replication, scoring and
-objectives per mode, results). Unlike MCVS, none of this ships in the client, so it is a real reimplementation driven
-by the client's parsers and builders. The size of the match server depends on §3.3: a "thin authoritative" server
-(rules, timers, spawns, scoring, relaying player state, trusting client hit reports) is a large but bounded job; full
-server-side simulation (movement validation, server hit registration, server-side bot AI with navigation) is far
-larger. One phone can host either, since the server needs no rendering.
+**What our servers must reimplement:** the Anubis lobby/controller; the TS (meta channel: profile, inventory,
+economy, tournaments, config), which is not in the client; and a GS that relays and runs the room/match lifecycle
+while one client holds the authority role. See [01-phase1b.md](01-phase1b.md) §6.
 
 ## 4. Content delivery
 
@@ -268,17 +262,13 @@ environment). This is the MC5 counterpart of MCVS loading its real client DLL. T
 2. **M1 – offline campaign:** meta channel (profile, inventory, economy, config files, tournaments as empty), storage
    on the device, CRM, BALD from local files. Device test: campaign missions play and progress survives restarts and
    updates.
-3. **M2 – bot/solo matches on our game server:** Anubis lobby/controller in-process, match server for one mode
-   first (Team Battle), then the others; bots either client-driven (if §3.3 allows) or server-side.
+3. **M2 – bot/solo matches on our game server:** Anubis lobby/controller in-process, a GS that relays and runs the
+   room/match lifecycle, the local client holding the authority role and running the bots (Phase 1b §5).
 4. **M3 – LAN:** one phone hosts (its embedded server binds the LAN address); other phones join by IP or discovery.
 5. **M4 – internet:** the desktop server build on a PC or VPS, account and token sharing between devices, optional
    relay.
 
-## Phase 1b (next analysis, before M1/M2 code)
+## Phase 1b
 
-1. Per-endpoint Federation contract (method, parameters, response fields, error handling) for the endpoints the boot
-   and campaign hit, driven by the M0 device log.
-2. The meta channel: every client builder and server message used by the campaign; the profile blob format.
-3. The offline flags (`federation_offline`, `no_fed`, `guest_mode`, `force_local_profiles`): if any of them lets the
-   client keep its profile locally, M1 shrinks a lot.
-4. Match authority (§3.3) and bot ownership.
+Done: [01-phase1b.md](01-phase1b.md) (offline flags, profile and save, meta channel/TS, Federation request builders,
+match authority and bots), with generated catalogs in [../protocol/](../protocol/).
