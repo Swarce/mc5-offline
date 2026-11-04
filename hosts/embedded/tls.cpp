@@ -44,6 +44,9 @@ void tls_dbg(void*, int level, const char*, int, const char* str) {
     logd("mbedtls(%d): %s", level, buf);
 }
 
+// Logs the SNI of each TLS ClientHello (defined after server(); registered below).
+int tls_sni_cb(void*, mbedtls_ssl_context*, const unsigned char*, std::size_t);
+
 // Process-wide server TLS context (cert, key, config), built once.
 struct TlsServer {
     mbedtls_entropy_context entropy;
@@ -88,6 +91,9 @@ struct TlsServer {
         // fatal alert if one is received. Raise to 3 for full handshake tracing.
         mbedtls_ssl_conf_dbg(&conf, tls_dbg, nullptr);
         mbedtls_debug_set_threshold(1);
+        // Log the target hostname (SNI) of every TLS connection, so we can see
+        // which backend host the client is reaching after eve (pandora/auth/...).
+        mbedtls_ssl_conf_sni(&conf, tls_sni_cb, nullptr);
         r = mbedtls_ssl_conf_own_cert(&conf, &cert, &key);
         if (r != 0) { loge("tls: conf_own_cert failed -0x%04x", -r); return; }
 
@@ -99,6 +105,19 @@ struct TlsServer {
 TlsServer& server() {
     static TlsServer s;
     return s;
+}
+
+// Logs the SNI (target hostname) of each TLS ClientHello — even for handshakes
+// that later reset — so we can see exactly which backend host the client reaches
+// over TLS. It resolves via c-ares, so we otherwise only see redirected IPs.
+int tls_sni_cb(void*, mbedtls_ssl_context* ssl, const unsigned char* name, std::size_t len) {
+    char buf[256];
+    std::size_t n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
+    std::memcpy(buf, name, n);
+    buf[n] = '\0';
+    logi("tls: ClientHello SNI = %s", buf);
+    mbedtls_ssl_set_hs_own_cert(ssl, &server().cert, &server().key);
+    return 0;
 }
 
 // A TLS-terminating connection over an accepted fd.
