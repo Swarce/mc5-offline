@@ -81,6 +81,14 @@ void register_core(Router& router, ServerContext& ctx);
 void register_eve(Router& router, ServerContext& ctx);
 void register_pandora(Router& router, ServerContext& ctx);
 void register_auth(Router& router, ServerContext& ctx);
-void register_misc(Router& router, ServerContext& ctx); // catch-all logger
+void register_config(Router& router, ServerContext& ctx);      // CRM / live config document
+void register_ecomm(Router& router, ServerContext& ctx);       // IAP store (ecomm_api_root / crm_iap)
+void register_matchmaker(Router& router, ServerContext& ctx);  // quick_join_ah -> TS controller info
+void register_misc(Router& router, ServerContext& ctx);        // catch-all logger
+
+// The TS / Anubis meta-channel handler (non-HTTP). Wired onto the Server via
+// set_meta_handler() by the host. Conn is declared in server.hpp.
+class Conn;
+void serve_meta_conn(ServerContext& ctx, Conn& c, const std::string& peer);
 
 } // namespace mc5

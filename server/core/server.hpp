@@ -61,6 +61,15 @@ public:
     using TlsUpgrade = std::function<std::unique_ptr<Conn>(int fd)>;
     void set_tls_upgrade(TlsUpgrade f) { tls_upgrade_ = std::move(f); }
 
+    // Optional non-HTTP connection handler (the TS/Anubis meta-channel). The
+    // loopback port is multiplexed: a connection that is neither a TLS ClientHello
+    // nor an HTTP request (notably the server-speaks-first Anubis controller, which
+    // sends nothing until we greet it) is handed to this handler instead of the
+    // HTTP state machine. The handler owns the Conn for its lifetime. Left unset,
+    // such connections are logged and dropped. See services/meta.cpp.
+    using MetaHandler = std::function<void(Conn& c, const std::string& peer)>;
+    void set_meta_handler(MetaHandler f) { meta_handler_ = std::move(f); }
+
 private:
     void accept_loop();
 
@@ -70,6 +79,7 @@ private:
     std::atomic<bool> running_{false};
     std::thread accept_thread_;
     TlsUpgrade tls_upgrade_;
+    MetaHandler meta_handler_;
 };
 
 } // namespace mc5

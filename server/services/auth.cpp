@@ -31,16 +31,27 @@ std::string account_from_token(const std::string& token) {
     return dot == std::string::npos ? std::string() : token.substr(0, dot);
 }
 
-// The credential the client is authorizing. The user-token builders send it as
-// "username"; some paths use "credential". Fall back to a per-device anonymous id.
+// The credential the client is authorizing, normalized to ONE canonical
+// "type:username" form so every auth path derives the SAME account id. The
+// tracking/BI session sends a single combined field credential=anonymous:<GLUID>,
+// while the main game session (builder FUN_00d18d80) sends SEPARATE accountType +
+// username fields. Reading "username" first (as before) made those two derive
+// different accounts and desynced users/me/verify/the TS. Compose consistently:
+// prefer the already-combined "credential", else join accountType/credential_type
+// with username.
 std::string requested_credential(const Request& req, const ServerContext& ctx) {
-    std::string c = req.value("username");
-    if (c.empty()) c = req.value("credential");
-    if (c.empty()) {
-        std::string dev = req.value("device_id");
-        c = dev.empty() ? std::string("anon") : ("anon:" + dev);
+    std::string cred = req.value("credential");
+    if (!cred.empty()) return cred; // already "type:username" (tracking path)
+
+    std::string user = req.value("username");
+    if (!user.empty()) {
+        std::string type = req.value("credential_type");
+        if (type.empty()) type = req.value("accountType");
+        if (!type.empty() && user.find(':') == std::string::npos) return type + ":" + user;
+        return user;
     }
-    return c;
+    std::string dev = req.value("device_id");
+    return dev.empty() ? std::string("anon") : ("anon:" + dev);
 }
 
 Response authorize(ServerContext& ctx, const Request& req) {
@@ -50,9 +61,19 @@ Response authorize(ServerContext& ctx, const Request& req) {
 
     Json o = Json::object();
     o["access_token"] = make_token(account);
-    o["scope"] = scope; // echo requested scopes (empty is acceptable)
-    logd("auth/authorize: credential=%s -> account=%s scope='%s'", credential.c_str(), account.c_str(), scope.c_str());
+    o["scope"] = scope;              // echo requested scopes verbatim (empty is acceptable)
+    o["token_type"] = "bearer";      // native Gaia may read these; harmless to the proven path
+    o["expires_in"] = 31536000;      // ~1 year; tokens never actually expire here
+    logi("auth/authorize: credential=%s -> account=%s scope='%s'", credential.c_str(), account.c_str(), scope.c_str());
     return Response::json(o.dump());
+}
+
+// A stable 9-digit alias ("friend code") derived from the account id.
+std::string alias_for(const std::string& account) {
+    unsigned long long h = 1469598103934665603ULL; // FNV-1a over the account hex
+    for (char c : account) { h ^= static_cast<unsigned char>(c); h *= 1099511628211ULL; }
+    unsigned long long n = (h % 900000000ULL) + 100000000ULL; // 9 digits, no leading zero
+    return std::to_string(n);
 }
 
 Response users_me(ServerContext& ctx, const Request& req) {
@@ -67,13 +88,12 @@ Response users_me(ServerContext& ctx, const Request& req) {
 
     Json o = Json::object();
     o["account"] = account;
+    // credentials: an array of "type:username" STRINGS (not objects), matching the
+    // native parser (and MCVS). account must not contain ':'.
     Json creds = Json::array();
-    if (!credential.empty()) {
-        Json c = Json::object();
-        c["credential"] = credential;
-        creds.push_back(std::move(c));
-    }
+    if (!credential.empty()) creds.push_back(Json(credential));
     o["credentials"] = std::move(creds);
+    o["client_id"] = ctx.client_id;
     return Response::json(o.dump());
 }
 
@@ -84,6 +104,19 @@ void register_auth(Router& router, ServerContext& ctx) {
     router.add("GET", "authorize", [&ctx](const Request& r) { return authorize(ctx, r); });
 
     router.add("GET", "users/me", [&ctx](const Request& r) { return users_me(ctx, r); });
+
+    // games/{game}/alias: the client assigns itself a 9-digit alias ("friend code")
+    // on first run and reads it back. Uncaught (no popup) but must return {"alias":...}.
+    auto alias_h = [&ctx](const Request& r) {
+        std::string account = account_from_token(r.value("access_token"));
+        if (account.empty()) account = ctx.client_id; // best-effort; alias is cosmetic
+        Json o = Json::object();
+        o["alias"] = alias_for(account);
+        return Response::json(o.dump());
+    };
+    router.add("POST", "games/{game}/alias", alias_h);
+    router.add("GET", "games/{game}/alias", alias_h);
+    router.add("GET", "games/{game}/alias/{cred}", alias_h);
 
     // encrypt_token: returns the (encrypted) token for a nonce. We return the token
     // unchanged as plain text; the Anubis login forwards it to verify.

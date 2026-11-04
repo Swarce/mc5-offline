@@ -6,6 +6,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include "log.hpp"
@@ -219,13 +220,32 @@ void Server::accept_loop() {
         ::inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
         std::string peer_str = std::string(ip) + ":" + std::to_string(ntohs(peer.sin_port));
 
-        // Peek the first byte to tell HTTP from TLS on the same port. A TLS
-        // ClientHello begins with 0x16 (handshake record); the client speaks
-        // HTTPS to us for most Gaia/telemetry calls. If a TLS upgrade is wired
-        // (embedded build), terminate TLS over the fd; otherwise log+drop.
+        // Multiplex the port across three protocols by peeking the first byte:
+        //   * 0x16            -> TLS ClientHello (HTTPS; all observed Gaia/telemetry
+        //                        HTTP goes through TLS here).
+        //   * an HTTP method  -> plain HTTP.
+        //   * nothing (quiet) -> the Anubis controller / TS meta-channel, which is
+        //                        server-speaks-first: the client connects and waits
+        //                        for our "create connection" greeting before sending
+        //                        anything. A short peek timeout detects this.
+        // We MSG_PEEK so the byte is left in the socket for the real reader.
+        struct timeval tv{};
+        tv.tv_sec = 0;
+        tv.tv_usec = 500 * 1000; // 500 ms: HTTPS/HTTP clients send immediately
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         unsigned char first = 0;
         long pk = ::recv(fd, reinterpret_cast<char*>(&first), 1, MSG_PEEK);
+        struct timeval zero{};
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &zero, sizeof(zero)); // back to blocking
+
+        if (pk == 0) { ::close(fd); continue; } // peer closed before sending
+
         bool is_tls = (pk == 1 && first == 0x16);
+        bool quiet = (pk < 0); // timeout (no data) -> server-speaks-first meta channel
+        bool is_http = (pk == 1 && !is_tls &&
+                        (first == 'G' || first == 'P' || first == 'H' || first == 'D' ||
+                         first == 'O' || first == 'C' || first == 'T'));
+        bool is_meta = quiet || (pk == 1 && !is_tls && !is_http);
 
         if (is_tls && !tls_upgrade_) {
             logw("server: TLS ClientHello on :%d from %s — no TLS upgrade wired; dropping",
@@ -233,17 +253,27 @@ void Server::accept_loop() {
             ::close(fd);
             continue;
         }
-        if (pk == 1 && !is_tls && (first < 0x20 || first > 0x7e)) {
-            logw("server: non-HTTP first byte 0x%02x on :%d from %s", first, cfg_.port, peer_str.c_str());
+        if (is_meta && !meta_handler_) {
+            logw("server: non-HTTP connection on :%d from %s (first=0x%02x pk=%ld) — no meta handler; dropping",
+                 cfg_.port, peer_str.c_str(), first, pk);
+            ::close(fd);
+            continue;
         }
+        if (is_meta)
+            logi("server: meta-channel connection from %s (%s)", peer_str.c_str(),
+                 quiet ? "server-speaks-first" : "client-first");
 
         // One thread per connection; Gaia keeps few concurrent connections.
         TlsUpgrade up = is_tls ? tls_upgrade_ : TlsUpgrade{};
-        std::thread([this, fd, peer_str, up] {
+        bool meta = is_meta;
+        std::thread([this, fd, peer_str, up, meta] {
             if (up) {
                 std::unique_ptr<Conn> c = up(fd); // TLS handshake; owns fd
                 if (!c) return;                   // up() already closed fd on failure
                 serve_conn(*c, peer_str);
+            } else if (meta) {
+                FdConn c(fd);
+                meta_handler_(c, peer_str);       // Anubis/TS meta-channel; owns c
             } else {
                 FdConn c(fd);
                 serve_conn(c, peer_str);

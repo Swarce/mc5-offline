@@ -27,6 +27,9 @@ void register_services(Router& router, ServerContext& ctx) {
     register_eve(router, ctx);
     register_pandora(router, ctx);
     register_auth(router, ctx);
+    register_config(router, ctx);
+    register_ecomm(router, ctx);
+    register_matchmaker(router, ctx);
     register_misc(router, ctx); // installs the fallback
 }
 

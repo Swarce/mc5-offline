@@ -58,6 +58,11 @@ void start_locked(const std::string& data_dir) {
     // backend hosts and to our redirect, so the listener auto-detects a TLS
     // ClientHello and wraps the fd. The client doesn't verify certs.
     g_server->set_tls_upgrade([](int fd) { return mc5::tls_upgrade(fd); });
+    // Route non-HTTP connections (the Anubis controller / TS meta-channel) to the
+    // Federation meta handler instead of the HTTP state machine.
+    g_server->set_meta_handler([](mc5::Conn& c, const std::string& peer) {
+        if (g_ctx) mc5::serve_meta_conn(*g_ctx, c, peer);
+    });
 
     if (g_server->start()) {
         g_started.store(true);

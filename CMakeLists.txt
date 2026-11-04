@@ -22,6 +22,10 @@ add_library(mc5server STATIC
   server/services/eve.cpp
   server/services/pandora.cpp
   server/services/auth.cpp
+  server/services/config.cpp
+  server/services/ecomm.cpp
+  server/services/matchmaker.cpp
+  server/services/meta.cpp
   server/services/misc.cpp
 )
 target_include_directories(mc5server PUBLIC ${CMAKE_SOURCE_DIR})

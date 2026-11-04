@@ -60,6 +60,9 @@ int main(int argc, char** argv) {
 
     mc5::Server server(cfg);
     mc5::register_services(server.router(), ctx);
+    server.set_meta_handler([&ctx](mc5::Conn& c, const std::string& peer) {
+        mc5::serve_meta_conn(ctx, c, peer);
+    });
 
     g_server.store(&server);
     std::signal(SIGINT, on_signal);
