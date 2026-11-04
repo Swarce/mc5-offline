@@ -32,13 +32,14 @@ int apply_libmc5_tls_bypass();
 // Eve response", …). Fingerprint-guarded; returns 1 if installed. arm64 only.
 int install_iris_log_hook();
 
-// Diagnostic: full-replaces the Gaia result-code setter (FUN @ 0xc35cf8, verified by
-// disasm) with a faithful reimplementation — lock(*(ctx+0x48)); *(*(ctx+0x10))=code;
-// unlock — that additionally logs any non-zero code, naming the exact Gaia error that
-// reaches the UI (e.g. the 0x1d behind the connection-error popup). The lock/unlock
-// are the library's own asio posix_mutex members, so behaviour is unchanged.
-// Address-matched (its prologue is shared) and fingerprint-guarded; returns 1 if
-// installed. arm64 only.
-int install_gaia_result_hook();
+// Diagnostic: installs entry-trace hooks on the Restrictions/legislation functions that
+// decide the post-login flow (ProcessCompliancy, Restrictions::Init, GetLegislationVersion,
+// RequestRestrictions, the compliancy-fetch vtable slot, the restricted-mode signal and
+// the boot legislation loader). Each is a continuation trampoline that logs the call
+// (label, x0/x1, caller-LR as a libMC5 file offset; Restrictions-object hooks also dump
+// the +0x100/+0x178/+0x218 gate fields) and then runs the original intact. The first 4
+// instructions of every target are verified position-independent before relocation;
+// refuses otherwise. Returns the number installed. arm64 only. See docs/research/02 §7.
+int install_legislation_trace_hooks();
 
 } // namespace mc5

@@ -39,21 +39,26 @@ constexpr uintptr_t kIrisLogVaddr = 0x1386098;
 const unsigned char kIrisLogFp[16] = {0xff, 0x03, 0x01, 0xd1, 0xf3, 0x13, 0x00, 0xf9,
                                       0xfd, 0x7b, 0x03, 0xa9, 0xfd, 0xc3, 0x00, 0x91};
 
-// Gaia result/error setter (real addr, verified by disasm): void(ctx /*x0*/, code
-// /*w1*/) = { lock(*(ctx+0x48)); *(*(ctx+0x10)) = code; unlock; }. This is where the
-// connection-error popup's result code (0x1d=29) is stored. We full-replace it with
-// a faithful reimplementation that ALSO logs a non-zero code, so a device capture
-// names the exact Gaia error driving the popup. The lock/unlock are asio posix_mutex
-// members at the real addresses below (from the same disasm). The 16-byte prologue is
-// shared by many frames, so this is matched by address, not fingerprint alone.
-constexpr uintptr_t kGaiaResultVaddr = 0xc35cf8;
-constexpr uintptr_t kPosixLockVaddr = 0x4b22f0;
-constexpr uintptr_t kPosixUnlockVaddr = 0x4b2320;
-const unsigned char kGaiaResultFp[16] = {0xf5, 0x0f, 0x1d, 0xf8, 0xf4, 0x4f, 0x01, 0xa9,
-                                         0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91};
-using MutexFn = void (*)(void*);
-MutexFn g_posix_lock = nullptr;
-MutexFn g_posix_unlock = nullptr;
+// --- Entry-trace diagnostics -------------------------------------------------
+// The post-login connection-error popup is NOT a Gaia result code: hooking the Gaia
+// result setter 0xc35cf8 (prior round) logged nothing, and every federation op is 200.
+// The verified mechanism (docs/research/02 §7) is that the Restrictions/legislation
+// subsystem never initializes because compliancy.json is never fetched at boot. To pin
+// the exact runtime path (and whether the compliancy fetch / RequestRestrictions / the
+// restricted-mode signal ever fire), we install ENTRY-TRACE hooks on the decisive
+// functions: a continuation trampoline that logs (label, x0, x1, caller-LR) and then
+// runs the original intact. All target addresses below are REAL file vaddrs (verified
+// via tools/re on the shipped libMC5.so) and their first 4 instructions are
+// position-independent (checked), so relocating them into the trampoline is safe.
+constexpr uintptr_t kTrProcessCompliancy    = 0x13961e8; // login FSM state5 -> compliancy eval
+constexpr uintptr_t kTrRestrictionsInit     = 0x13c56c0; // Restrictions::Init (reads +0x100/+0x218)
+constexpr uintptr_t kTrGetLegislationVersion= 0x13d3538; // reads Restrictions+0x178 (null => empty)
+constexpr uintptr_t kTrRequestRestrictions  = 0x13a20b0; // post-age update path (dispatches slot4)
+constexpr uintptr_t kTrComplianceFetch      = 0x13b9d68; // compliancy provider slot4 (the fetch!)
+constexpr uintptr_t kTrRestrictedSignal     = 0x13d02e8; // ProcessRestrictions "restricted mode!"
+constexpr uintptr_t kTrLegislationLoader    = 0x13d6fd8; // boot legislation loader (cache-read)
+
+uintptr_t g_mc5_base = 0; // cached libMC5 base for LR->file-offset in trace logs
 
 // asio::ssl::detail::engine::verify_callback_function(int, X509_STORE_CTX*) — the
 // callback OpenSSL invokes to accept/reject the server cert. Exported (WEAK), so
@@ -124,22 +129,115 @@ void mc5_iris_log_tee(void* /*ctx*/, const void* msg) {
     logi("gaia[IRIS]: %.*s", static_cast<int>(len), data);
 }
 
-// Full replacement for the Gaia result-code setter at kGaiaResultVaddr. The original
-// (verified by disasm) is exactly:
-//     lock(*(ctx+0x48));  *(*(ctx+0x10)) = code;  unlock(mutex);
-// where lock/unlock are asio posix_mutex members at kPosixLock/UnlockVaddr. We
-// replicate it byte-for-byte in behaviour and additionally log any non-zero code, so
-// a device capture names the exact Gaia error reaching the UI (e.g. the 0x1d that
-// drives the connection-error popup). Runs on a normal game thread, so logi() is safe.
-void mc5_gaia_result_tee(void* ctx, unsigned int code) {
-    if (code != 0)
-        logi("gaia-result: code=0x%x (%u) ctx=%p", code, code, ctx);
-    if (ctx == nullptr) return;
-    void* mutex = *reinterpret_cast<void**>(reinterpret_cast<char*>(ctx) + 0x48);
-    if (g_posix_lock) g_posix_lock(mutex);
-    int* slot = *reinterpret_cast<int**>(reinterpret_cast<char*>(ctx) + 0x10);
-    if (slot) *slot = static_cast<int>(code);
-    if (g_posix_unlock) g_posix_unlock(mutex);
+// Generic entry-trace callback: logs the function label, first two integer args and
+// the caller return address (as a libMC5 file offset, so it maps straight back to a
+// disassembly address). Called from the trampoline shim with the game's x0/x1/x30
+// preserved. Runs on a normal game thread, so logi() (mutex + __android_log) is safe.
+extern "C" void mc5_trace(const char* label, unsigned long long a0, unsigned long long a1,
+                          unsigned long long lr) {
+    unsigned long long off = (g_mc5_base && lr >= g_mc5_base) ? (lr - g_mc5_base) : lr;
+    logi("trace: %s x0=0x%llx x1=0x%llx lr=+0x%llx", label, a0, a1, off);
+}
+
+// Specialised trace for functions whose x0 is the Restrictions object: also dumps the
+// three gate fields we care about — +0x100 (Init full-branch gate), +0x178 (legislation
+// JSON pointer; null => GetLegislationVersion returns JSON_NOT_INITIALIZED) and +0x218
+// (IsLegislationInitialized atomic flag). x0 is a valid object at these entries; guard
+// the null case only.
+extern "C" void mc5_trace_restr(const char* label, unsigned long long thisptr,
+                                unsigned long long /*a1*/, unsigned long long lr) {
+    unsigned long long off = (g_mc5_base && lr >= g_mc5_base) ? (lr - g_mc5_base) : lr;
+    if (thisptr == 0) { logi("trace: %s this=0 lr=+0x%llx", label, off); return; }
+    unsigned int f100 = *reinterpret_cast<volatile unsigned int*>(thisptr + 0x100);
+    unsigned long long p178 = *reinterpret_cast<volatile unsigned long long*>(thisptr + 0x178);
+    unsigned int f218 = *reinterpret_cast<volatile unsigned char*>(thisptr + 0x218);
+    logi("trace: %s this=0x%llx +0x100=0x%x +0x178=0x%llx +0x218=0x%x lr=+0x%llx",
+         label, thisptr, f100, p178, f218, off);
+}
+
+// Reject relocating an instruction that is PC-relative (adr/adrp, b/bl, b.cond,
+// cbz/cbnz, tbz/tbnz, ldr/ldrsw literal) — those break when moved into the trampoline.
+bool reloc_safe(unsigned int w) {
+    if ((w & 0x1f000000u) == 0x10000000u) return false; // ADR/ADRP
+    if ((w & 0xfc000000u) == 0x14000000u) return false; // B
+    if ((w & 0xfc000000u) == 0x94000000u) return false; // BL
+    if ((w & 0xff000010u) == 0x54000000u) return false; // B.cond
+    if ((w & 0x7e000000u) == 0x34000000u) return false; // CBZ/CBNZ
+    if ((w & 0x7e000000u) == 0x36000000u) return false; // TBZ/TBNZ
+    if ((w & 0x3b000000u) == 0x18000000u) return false; // LDR/LDRSW (literal)
+    return true;
+}
+
+// Build an entry-trace trampoline for `vaddr` and patch its entry to jump there.
+// Trampoline layout (validated with capstone): save x0-x8+x30; set up logger args
+// (label, orig x0, orig x1, caller LR); call `logger`; restore; run the relocated
+// original 16 bytes; jump to vaddr+16. `label` must be a static string (its pointer is
+// embedded in the trampoline).
+int install_trace_hook(const char* label, uintptr_t vaddr, void* logger) {
+    if (g_mc5_base == 0) { logw("trace-hook %s: base unknown", label); return 0; }
+    void* site = reinterpret_cast<void*>(vaddr);
+    unsigned int orig[4];
+    std::memcpy(orig, site, sizeof(orig));
+    for (int i = 0; i < 4; ++i) {
+        if (!reloc_safe(orig[i])) {
+            logw("trace-hook %s: insn %d (0x%08x) at %p not relocatable — refusing", label, i, orig[i], site);
+            return 0;
+        }
+    }
+    long ps = sysconf(_SC_PAGESIZE);
+    void* page = mmap(nullptr, ps, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) { loge("trace-hook %s: mmap failed", label); return 0; }
+    unsigned int* w = static_cast<unsigned int*>(page);
+    int n = 0;
+    w[n++] = 0xD10183FF; // sub  sp, sp, #0x60
+    w[n++] = 0xA90007E0; // stp  x0, x1, [sp]
+    w[n++] = 0xA9010FE2; // stp  x2, x3, [sp, #0x10]
+    w[n++] = 0xA90217E4; // stp  x4, x5, [sp, #0x20]
+    w[n++] = 0xA9031FE6; // stp  x6, x7, [sp, #0x30]
+    w[n++] = 0xA9047BE8; // stp  x8, x30, [sp, #0x40]
+    int wi_label = n; w[n++] = 0x58000000;            // ldr  x0, #label  (imm19 patched below)
+    w[n++] = 0xF94003E1; // ldr  x1, [sp]        (orig x0)
+    w[n++] = 0xF94007E2; // ldr  x2, [sp, #8]    (orig x1)
+    w[n++] = 0xF94027E3; // ldr  x3, [sp, #0x48] (orig lr)
+    int wi_log = n;   w[n++] = 0x58000009;            // ldr  x9, #logger (imm19 patched below)
+    w[n++] = 0xD63F0120; // blr  x9
+    w[n++] = 0xA94007E0; // ldp  x0, x1, [sp]
+    w[n++] = 0xA9410FE2; // ldp  x2, x3, [sp, #0x10]
+    w[n++] = 0xA94217E4; // ldp  x4, x5, [sp, #0x20]
+    w[n++] = 0xA9431FE6; // ldp  x6, x7, [sp, #0x30]
+    w[n++] = 0xA9447BE8; // ldp  x8, x30, [sp, #0x40]
+    w[n++] = 0x910183FF; // add  sp, sp, #0x60
+    for (int i = 0; i < 4; ++i) w[n++] = orig[i];     // relocated original prologue
+    w[n++] = 0x58000050; // ldr  x16, #8
+    w[n++] = 0xD61F0200; // br   x16
+    // 16-byte align the data pool, then: [cont target][label ptr][logger ptr].
+    while ((n & 1) != 0) w[n++] = 0xD503201F; // nop pad to 8-byte boundary
+    int di = n;
+    unsigned long long* d = reinterpret_cast<unsigned long long*>(&w[di]);
+    d[0] = static_cast<unsigned long long>(vaddr + 16);            // continuation target
+    d[1] = reinterpret_cast<unsigned long long>(label);           // label string ptr
+    d[2] = reinterpret_cast<unsigned long long>(logger);          // logger fn ptr
+    // Patch the three ldr-literal loads. imm19 is in WORDS = (target_word - insn_word).
+    // Data pool: d[0]=cont @word di, d[1]=label @word di+2, d[2]=logger @word di+4.
+    int wi_cont = n - 2; // index of `ldr x16,#8`
+    w[wi_cont]  = 0x58000000u | ((static_cast<unsigned int>(di     - wi_cont ) & 0x7ffffu) << 5) | 16; // ldr x16,d[0]
+    w[wi_label] = 0x58000000u | ((static_cast<unsigned int>(di + 2 - wi_label) & 0x7ffffu) << 5) | 0;  // ldr x0, d[1]
+    w[wi_log]   = 0x58000000u | ((static_cast<unsigned int>(di + 4 - wi_log  ) & 0x7ffffu) << 5) | 9;  // ldr x9, d[2]
+    __builtin___clear_cache(reinterpret_cast<char*>(page), reinterpret_cast<char*>(page) + ps);
+
+    // Patch the function entry: ldr x16,#8 ; br x16 ; <trampoline addr>.
+    unsigned char entry[16] = {0x50, 0x00, 0x00, 0x58, 0x00, 0x02, 0x1f, 0xd6};
+    void* tramp = page;
+    std::memcpy(entry + 8, &tramp, sizeof(tramp));
+    if (!set_prot(site, sizeof(entry), PROT_READ | PROT_WRITE)) {
+        loge("trace-hook %s: mprotect RW failed", label);
+        return 0;
+    }
+    std::memcpy(site, entry, sizeof(entry));
+    set_prot(site, sizeof(entry), PROT_READ | PROT_EXEC);
+    __builtin___clear_cache(reinterpret_cast<char*>(site), reinterpret_cast<char*>(site) + sizeof(entry));
+    logi("trace-hook %s: installed at %p -> tramp %p", label, site, page);
+    return 1;
 }
 
 } // namespace
@@ -208,31 +306,24 @@ int install_iris_log_hook() {
     return 1;
 }
 
-int install_gaia_result_hook() {
+int install_legislation_trace_hooks() {
     uintptr_t base = so_base("libMC5.so");
-    if (base == 0) { logw("gaia-result-hook: libMC5.so not loaded"); return 0; }
-    g_posix_lock = reinterpret_cast<MutexFn>(base + kPosixLockVaddr);
-    g_posix_unlock = reinterpret_cast<MutexFn>(base + kPosixUnlockVaddr);
-    void* site = reinterpret_cast<void*>(base + kGaiaResultVaddr);
-    // Match by address (this prologue is shared); verify all 16 bytes we overwrite.
-    if (std::memcmp(site, kGaiaResultFp, sizeof(kGaiaResultFp)) != 0) {
-        logw("gaia-result-hook: fingerprint mismatch at %p (got %s) — refusing", site,
-             hexpre(reinterpret_cast<unsigned char*>(site), 16).c_str());
-        return 0;
-    }
-    unsigned char tramp[16] = {0x50, 0x00, 0x00, 0x58,  // ldr x16, #8
-                               0x00, 0x02, 0x1f, 0xd6}; // br  x16
-    void* handler = reinterpret_cast<void*>(&mc5_gaia_result_tee);
-    std::memcpy(tramp + 8, &handler, sizeof(handler));
-    if (!set_prot(site, sizeof(tramp), PROT_READ | PROT_WRITE)) {
-        loge("gaia-result-hook: mprotect RW failed");
-        return 0;
-    }
-    std::memcpy(site, tramp, sizeof(tramp));
-    set_prot(site, sizeof(tramp), PROT_READ | PROT_EXEC);
-    __builtin___clear_cache(reinterpret_cast<char*>(site), reinterpret_cast<char*>(site) + sizeof(tramp));
-    logi("gaia-result-hook: installed at %p (Gaia result codes -> logcat)", site);
-    return 1;
+    if (base == 0) { logw("trace-hooks: libMC5.so not loaded"); return 0; }
+    g_mc5_base = base;
+    void* gen = reinterpret_cast<void*>(&mc5_trace);
+    void* rst = reinterpret_cast<void*>(&mc5_trace_restr);
+    int n = 0;
+    // Restrictions object (x0) hooks use the restr logger (dumps +0x100/+0x178/+0x218).
+    n += install_trace_hook("RestrictionsInit",      base + kTrRestrictionsInit,      rst);
+    n += install_trace_hook("GetLegislationVersion", base + kTrGetLegislationVersion, rst);
+    // Presence/path hooks use the generic logger (label + x0/x1 + caller).
+    n += install_trace_hook("ProcessCompliancy",     base + kTrProcessCompliancy,     gen);
+    n += install_trace_hook("RequestRestrictions",   base + kTrRequestRestrictions,   gen);
+    n += install_trace_hook("ComplianceFetch(slot4)",base + kTrComplianceFetch,       gen);
+    n += install_trace_hook("RestrictedSignal",      base + kTrRestrictedSignal,      gen);
+    n += install_trace_hook("LegislationLoader",     base + kTrLegislationLoader,     gen);
+    logi("trace-hooks: %d/7 legislation/restrictions entry hooks installed", n);
+    return n;
 }
 
 int apply_libmc5_tls_bypass() {
@@ -270,8 +361,8 @@ int install_iris_log_hook() {
     return 0;
 }
 
-int install_gaia_result_hook() {
-    logw("gaia-result-hook: no offset for this ABI (arm64 only)");
+int install_legislation_trace_hooks() {
+    logw("trace-hooks: no offsets for this ABI (arm64 only)");
     return 0;
 }
 

@@ -109,8 +109,8 @@ void start_redirect_installer(int http_port, int tls_port) {
                 // Log every Gaia result code reaching the UI, to name the exact
                 // error behind the connection-error popup (full-replace, behaviour
                 // preserved).
-                install_gaia_result_hook();
-                diag::boot_trace("gaia result hook installed");
+                install_legislation_trace_hooks();
+                diag::boot_trace("legislation trace hooks installed");
                 // Accept our self-signed loopback cert (client verifies otherwise).
                 apply_libmc5_tls_bypass();
                 diag::boot_trace("libMC5 tls verify bypassed");
