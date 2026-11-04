@@ -218,10 +218,36 @@ void Server::accept_loop() {
         char ip[64] = {0};
         ::inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
         std::string peer_str = std::string(ip) + ":" + std::to_string(ntohs(peer.sin_port));
+
+        // Peek the first byte to tell HTTP from TLS on the same port. A TLS
+        // ClientHello begins with 0x16 (handshake record); the client speaks
+        // HTTPS to us for most Gaia/telemetry calls. If a TLS upgrade is wired
+        // (embedded build), terminate TLS over the fd; otherwise log+drop.
+        unsigned char first = 0;
+        long pk = ::recv(fd, reinterpret_cast<char*>(&first), 1, MSG_PEEK);
+        bool is_tls = (pk == 1 && first == 0x16);
+
+        if (is_tls && !tls_upgrade_) {
+            logw("server: TLS ClientHello on :%d from %s — no TLS upgrade wired; dropping",
+                 cfg_.port, peer_str.c_str());
+            ::close(fd);
+            continue;
+        }
+        if (pk == 1 && !is_tls && (first < 0x20 || first > 0x7e)) {
+            logw("server: non-HTTP first byte 0x%02x on :%d from %s", first, cfg_.port, peer_str.c_str());
+        }
+
         // One thread per connection; Gaia keeps few concurrent connections.
-        std::thread([this, fd, peer_str] {
-            FdConn c(fd);
-            serve_conn(c, peer_str);
+        TlsUpgrade up = is_tls ? tls_upgrade_ : TlsUpgrade{};
+        std::thread([this, fd, peer_str, up] {
+            if (up) {
+                std::unique_ptr<Conn> c = up(fd); // TLS handshake
+                if (!c) { ::close(fd); return; }
+                serve_conn(*c, peer_str);
+            } else {
+                FdConn c(fd);
+                serve_conn(c, peer_str);
+            }
         }).detach();
     }
 }

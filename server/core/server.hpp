@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -53,6 +54,13 @@ public:
     // so a future TLS acceptor can reuse the HTTP state machine.
     void serve_conn(Conn& c, const std::string& peer);
 
+    // Optional TLS upgrade: given a fd whose first byte is a TLS ClientHello,
+    // return a Conn that terminates TLS over it (or null on handshake failure).
+    // The embedded host sets this (it owns the TLS library); the desktop build
+    // leaves it unset and simply logs+drops TLS. Keeps the core TLS-free.
+    using TlsUpgrade = std::function<std::unique_ptr<Conn>(int fd)>;
+    void set_tls_upgrade(TlsUpgrade f) { tls_upgrade_ = std::move(f); }
+
 private:
     void accept_loop();
 
@@ -61,6 +69,7 @@ private:
     int listen_fd_ = -1;
     std::atomic<bool> running_{false};
     std::thread accept_thread_;
+    TlsUpgrade tls_upgrade_;
 };
 
 } // namespace mc5

@@ -48,6 +48,14 @@ int my_getaddrinfo(const char* node, const char* service, const struct addrinfo*
 int my_connect(int fd, const struct sockaddr* addr, socklen_t len) {
     if (addr && addr->sa_family == AF_INET && len >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
         const sockaddr_in* in = reinterpret_cast<const sockaddr_in*>(addr);
+        // Diagnostic: log every connect libMC5 makes (host+port), so the full set
+        // of backend endpoints and their ports/schemes is visible — including
+        // direct loopback connects (e.g. the patched eve URL) that aren't remapped.
+        {
+            char ips[64] = {0};
+            inet_ntop(AF_INET, &in->sin_addr, ips, sizeof(ips));
+            logd("redirect: libMC5 connect -> %s:%u", ips, ntohs(in->sin_port));
+        }
         if (in->sin_addr.s_addr == htonl(INADDR_LOOPBACK)) {
             uint16_t port = ntohs(in->sin_port);
             int target = 0;

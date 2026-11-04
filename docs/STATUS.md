@@ -2,6 +2,25 @@
 
 Device-test history and the current state. Newest first.
 
+## November 2026: M0 first on-device run (Galaxy S22) + TLS transport
+
+* **The patched game runs on hardware.** The full re-signed split set (base + arm64 + xxhdpi +
+  all asset packs) installed and booted. logcat confirms the whole M0 chain fires on-device:
+  `libmc5offline.so` loads at +0 ms (before `libMC5.so` at +89 ms), the server listens on
+  127.0.0.1:51780, all **3 libMC5 http patches apply at runtime** (fingerprints matched), GOT
+  hooks install, and the crash handler/watchdog run. The game reached the campaign and tried the
+  tutorial.
+* **Gap found and fixed:** no Federation request reached the server — the only redirected traffic
+  was `sink.gameloft.com` telemetry over **:443**, i.e. the client speaks **HTTPS**, which our
+  plain-HTTP M0 server couldn't answer (so the tutorial failed with "can't connect"). Added a
+  **loopback TLS listener** (mbedTLS 3.6.2, self-signed cert, verify-none) that auto-detects a TLS
+  ClientHello vs plain HTTP on the same port and terminates TLS over the fd ([patches.md](patches.md),
+  `hosts/embedded/tls.cpp`). Host-verified with curl: HTTPS and HTTP both serve eve/auth 200s.
+  The eve http patch + scheme-rewrite neutralisation stay (http still works; https now also does).
+* Diagnostics extended: the listener logs a TLS ClientHello, and the redirect logs every libMC5
+  connect (host:port). Shipped as an inherited base+config update (keeps the installed asset packs).
+  Next: confirm the Federation chain is exercised on-device, then M1 (answer the campaign requests).
+
 ## October 2026: M0.5 diagnostics (host-verified, no device yet)
 
 * `hosts/embedded/diag.{hpp,cpp}` — [diagnostics.md](diagnostics.md). Boot trace

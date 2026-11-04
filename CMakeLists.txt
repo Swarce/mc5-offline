@@ -33,11 +33,24 @@ target_include_directories(mc5hook PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(mc5hook PUBLIC ${CMAKE_DL_LIBS})
 
 if(ANDROID)
+  # TLS for the loopback listener: mbedTLS, vendored under third_party/mbedtls
+  # (fetched + sha256-verified by scripts/build-android.sh if absent).
+  if(NOT EXISTS ${CMAKE_SOURCE_DIR}/third_party/mbedtls/CMakeLists.txt)
+    message(FATAL_ERROR "third_party/mbedtls missing — run scripts/build-android.sh (it fetches it) or see docs/DEV-LOOP.md")
+  endif()
+  if(NOT EXISTS ${CMAKE_SOURCE_DIR}/hosts/embedded/tls_cert.hpp)
+    message(FATAL_ERROR "hosts/embedded/tls_cert.hpp missing — run scripts/build-android.sh (it generates the loopback TLS cert)")
+  endif()
+  set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+  set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+  set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+  add_subdirectory(third_party/mbedtls EXCLUDE_FROM_ALL)
+
   # Embedded build: libmc5offline.so, loaded inside the game process. Same server
-  # tree, plus the JNI/C bootstrap. Links liblog (logcat) and libandroid.
-  add_library(mc5offline SHARED hosts/embedded/bootstrap.cpp hosts/embedded/redirect.cpp hosts/embedded/patch.cpp hosts/embedded/diag.cpp)
-  target_link_libraries(mc5offline PRIVATE mc5server mc5hook log android)
-  # Keep the C/JNI entry points; strip the rest for a small library.
+  # tree, plus the JNI/C bootstrap, diagnostics and TLS. Links liblog + libandroid.
+  add_library(mc5offline SHARED hosts/embedded/bootstrap.cpp hosts/embedded/redirect.cpp hosts/embedded/patch.cpp hosts/embedded/diag.cpp hosts/embedded/tls.cpp)
+  target_link_libraries(mc5offline PRIVATE mc5server mc5hook mbedtls mbedx509 mbedcrypto log android)
+  # Keep the C/JNI entry points; strip the rest (incl. mbedTLS) for a small library.
   target_link_options(mc5offline PRIVATE -Wl,--exclude-libs,ALL)
 else()
   # Desktop standalone host (dev loop, LAN/VPS host later).

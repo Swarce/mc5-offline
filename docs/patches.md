@@ -19,12 +19,22 @@ loaded, before Gaia initialises.
 
 The client's first backend call is HTTPS to `eve.gameloft.com`. It does not verify
 certificates, but it still performs a TLS handshake, so a plain-HTTP server cannot
-answer it unchanged. Rather than add a TLS stack to the embedded library, M0 makes the
-Gaia path plain HTTP on loopback (the same thing MCVS did by pointing eve at an
-`http://` URL). That needs exactly two things patched in libMC5; everything else is
-served by our own URLs. This is the allowed "patch only hostnames/TLS, and say why"
-case from the project rules. Loopback TLS with zero patches remains a possible
-alternative (see `docs/ARCHITECTURE.md`).
+answer it unchanged. Rather than add a TLS stack to the embedded library, M0 first
+tried making the Gaia path plain HTTP on loopback (the same thing MCVS did by pointing
+eve at an `http://` URL). That needs exactly two things patched in libMC5; everything
+else is served by our own URLs. This is the allowed "patch only hostnames/TLS, and say
+why" case from the project rules.
+
+**On-device result (Nov 2026):** the first Galaxy S22 run showed the client still speaks
+**HTTPS** — the only traffic reaching our redirect was `sink.gameloft.com` telemetry over
+port 443, and no plain-HTTP request ever arrived, so the tutorial failed with "can't
+connect". The plain-HTTP assumption did not hold, so a **loopback TLS listener was added**
+(`hosts/embedded/tls.cpp`, mbedTLS 3.6.2, self-signed cert, `VERIFY_NONE` — the client does
+not check certificates). The server auto-detects a TLS ClientHello (first byte `0x16`) vs
+plain HTTP on the same port 51780 and terminates TLS over the socket. The two patches below
+stay and are complementary: the eve literal points the first call at our server and the
+scheme-rewrite neutralisation keeps our returned URLs intact; whether the client then uses
+http or https, the one listener serves both.
 
 ## Patch sites
 

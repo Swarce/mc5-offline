@@ -13,8 +13,10 @@ The full proposal with the evidence behind it is in [research/00-recon.md](resea
 * **Redirect (M0 choice):** the game is pointed at our loopback server by two in-memory patches to the *loaded*
   libMC5 — the hard-coded eve URL and the http→https scheme rewrite ([patches.md](patches.md)) — plus GOT hooks of
   `getaddrinfo`/`connect` as a backstop. The `libMC5.so` **file on disk is never modified**, so its integrity hash
-  is unchanged. This serves the Gaia path as plain HTTP on loopback, so the embedded library needs no TLS stack (as
-  MCVS did by pointing eve at an `http://` URL). Loopback TLS with zero patches stays a possible alternative.
+  is unchanged. The first on-device run (Nov 2026) showed the client still connects over **HTTPS**, so the embedded
+  server now also **terminates TLS on loopback** (mbedTLS, self-signed, verify-none): one listener auto-detects a TLS
+  ClientHello vs plain HTTP on port 51780 and serves both. The eve/scheme patches remain complementary to it
+  ([patches.md](patches.md)).
 * **Patcher** (player's own splits in, one APK out): merges the splits, keeps every supplied ABI, makes
   `MainActivity` load our library, points the asset-pack paths at a local copy, re-signs with the player's key.
   Every patch checks the exact shipped bytes first and has a dry run.

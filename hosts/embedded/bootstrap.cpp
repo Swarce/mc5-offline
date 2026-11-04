@@ -23,6 +23,7 @@
 #include "../../server/services/services.hpp"
 #include "diag.hpp"
 #include "redirect.hpp"
+#include "tls.hpp"
 
 namespace {
 
@@ -50,6 +51,10 @@ void start_locked(const std::string& data_dir) {
     cfg.port = g_ctx->port;
     g_server = std::make_unique<mc5::Server>(cfg);
     mc5::register_services(g_server->router(), *g_ctx);
+    // Terminate TLS on the same loopback port: the game speaks HTTPS to its
+    // backend hosts and to our redirect, so the listener auto-detects a TLS
+    // ClientHello and wraps the fd. The client doesn't verify certs.
+    g_server->set_tls_upgrade([](int fd) { return mc5::tls_upgrade(fd); });
 
     if (g_server->start()) {
         g_started.store(true);

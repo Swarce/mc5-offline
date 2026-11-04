@@ -49,3 +49,10 @@ __pycache__/
 # Patcher build output (Gradle)
 patcher/build/
 patcher/.gradle/
+
+# Vendored, fetched-on-build (pinned + sha256-verified in build-android.sh)
+third_party/mbedtls/
+third_party/*.tar.bz2
+
+# Generated loopback TLS cert+key (private key; regenerated per machine)
+hosts/embedded/tls_cert.hpp
