@@ -2,6 +2,23 @@
 
 Device-test history and the current state. Newest first.
 
+## November 2026: transport solved on device → into M1 (serving the Federation chain)
+
+* **The TLS-verify bypass worked:** with patch #4 applied, the game's HTTPS requests reach our
+  server and are answered — logcat shows `GET /config/{clientId}/datacenters?country=CA -> 200`
+  and `.../datacenters/{dc}/urls -> 200` over TLS on loopback. The whole M0 transport problem
+  (redirect + TLS terminate + cert accept) is solved on hardware. (`mbedtls(1) …-0x7880` lines
+  are just the client's per-request `close_notify`.)
+* **First M1 bug — eve loop:** the client looped datacenters→urls and never advanced to pandora.
+  Cause (confirmed against the MCVS Offline eve contract, same Gaia SDK): our urls object had only
+  `pandora`/`federation`, but the client's `IapStoreComponent.InitNative` **throws** without
+  `ecomm_api_root` and `crm_iap`, so boot failed and retried. Fix: eve urls now returns the full
+  service map (`pandora, federation, game_portal, ads_agency, marketing_site, ecomm_api_root,
+  crm_iap, etsv2`, each `<base><service>/`, no `status` key) and datacenters carries `country_code`.
+  Because the handed-out URLs now carry a `/<service>/` prefix, the router's service-prefix list was
+  extended (pandora, the eve services, globalidservice) so `/pandora/locate/…` strips to the root
+  route. Host-verified with curl. Awaiting the next device log (expect pandora/locate + auth next).
+
 ## November 2026: M0 first on-device run (Galaxy S22) + TLS transport
 
 * **The patched game runs on hardware.** The full re-signed split set (base + arm64 + xxhdpi +

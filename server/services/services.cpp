@@ -3,13 +3,23 @@
 namespace mc5 {
 
 void register_services(Router& router, ServerContext& ctx) {
-    // Service names pandora/locate hands out as a path prefix. A request that
-    // arrives prefixed (e.g. "/auth/authorize") is retried with the prefix
-    // stripped so it reaches the root-registered route ("authorize").
+    // Service names that may arrive as a leading path segment, because the URLs we
+    // hand out (eve's urls object and pandora/locate) are "<base><service>/": a
+    // request can come in as "/auth/authorize" or "/pandora/locate/auth" (string
+    // concat) as well as the root form (RFC-3986 relative resolution drops the
+    // service segment). Any such prefix is stripped so the root route matches.
+    // Includes the eve-served services (pandora itself, ecomm_api_root, crm_iap …)
+    // and the native-only ones, not just the pandora-located fed services.
     router.set_service_prefixes({
+        // fed services (located via pandora)
         "auth", "storage", "message", "feeds", "leaderboard", "social", "asset",
         "matchmaker", "lobby", "lottery", "voice", "config", "alert", "schedule",
         "transaction", "groupchat", "game_stats", "crm", "assets",
+        // eve-served services (eve urls object)
+        "pandora", "federation", "game_portal", "ads_agency", "marketing_site",
+        "ecomm_api_root", "crm_iap", "etsv2",
+        // native-only services
+        "globalidservice",
     });
 
     // Order: specific service routes first, catch-all fallback last.
