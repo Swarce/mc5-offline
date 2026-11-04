@@ -45,6 +45,14 @@ if(ANDROID)
   set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
   set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
   add_subdirectory(third_party/mbedtls EXCLUDE_FROM_ALL)
+  # Make mbedTLS thread-safe: the one server RSA key / ctr_drbg are shared across
+  # per-connection handshake threads, and without internal locking concurrent
+  # handshakes corrupt the RSA blinding state (intermittent RSA_PRIVATE_FAILED ->
+  # failed handshakes -> the client retries, which looked like a boot loop). PUBLIC
+  # so tls.cpp sees the same context layout (the mutex members change struct sizes).
+  foreach(mbt mbedcrypto mbedx509 mbedtls)
+    target_compile_definitions(${mbt} PUBLIC MBEDTLS_THREADING_C MBEDTLS_THREADING_PTHREAD)
+  endforeach()
 
   # Embedded build: libmc5offline.so, loaded inside the game process. Same server
   # tree, plus the JNI/C bootstrap, diagnostics and TLS. Links liblog + libandroid.
