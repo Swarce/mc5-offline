@@ -32,14 +32,13 @@ int apply_libmc5_tls_bypass();
 // Eve response", …). Fingerprint-guarded; returns 1 if installed. arm64 only.
 int install_iris_log_hook();
 
-// Diagnostic: installs entry-trace hooks on the Restrictions/legislation functions that
-// decide the post-login flow (ProcessCompliancy, Restrictions::Init, GetLegislationVersion,
-// RequestRestrictions, the compliancy-fetch vtable slot, the restricted-mode signal and
-// the boot legislation loader). Each is a continuation trampoline that logs the call
-// (label, x0/x1, caller-LR as a libMC5 file offset; Restrictions-object hooks also dump
-// the +0x100/+0x178/+0x218 gate fields) and then runs the original intact. The first 4
+// Diagnostic: installs entry-trace hooks on the Gaia online-login Lua bridge
+// (onLoginCompleted, onLoginFailed[code in w2], onDisconnected) plus StartLogin, to
+// capture exactly what the game decides after the HTTP login chain and what re-triggers
+// the ~15s re-login loop. Each is a continuation trampoline that logs (label, x0, x1,
+// x2, caller-LR as a libMC5 file offset) then runs the original intact. The first 4
 // instructions of every target are verified position-independent before relocation;
 // refuses otherwise. Returns the number installed. arm64 only. See docs/research/02 §7.
-int install_legislation_trace_hooks();
+int install_login_trace_hooks();
 
 } // namespace mc5

@@ -40,23 +40,21 @@ const unsigned char kIrisLogFp[16] = {0xff, 0x03, 0x01, 0xd1, 0xf3, 0x13, 0x00, 
                                       0xfd, 0x7b, 0x03, 0xa9, 0xfd, 0xc3, 0x00, 0x91};
 
 // --- Entry-trace diagnostics -------------------------------------------------
-// The post-login connection-error popup is NOT a Gaia result code: hooking the Gaia
-// result setter 0xc35cf8 (prior round) logged nothing, and every federation op is 200.
-// The verified mechanism (docs/research/02 §7) is that the Restrictions/legislation
-// subsystem never initializes because compliancy.json is never fetched at boot. To pin
-// the exact runtime path (and whether the compliancy fetch / RequestRestrictions / the
-// restricted-mode signal ever fire), we install ENTRY-TRACE hooks on the decisive
-// functions: a continuation trampoline that logs (label, x0, x1, caller-LR) and then
-// runs the original intact. All target addresses below are REAL file vaddrs (verified
-// via tools/re on the shipped libMC5.so) and their first 4 instructions are
-// position-independent (checked), so relocating them into the trampoline is safe.
-constexpr uintptr_t kTrProcessCompliancy    = 0x13961e8; // login FSM state5 -> compliancy eval
-constexpr uintptr_t kTrRestrictionsInit     = 0x13c56c0; // Restrictions::Init (reads +0x100/+0x218)
-constexpr uintptr_t kTrGetLegislationVersion= 0x13d3538; // reads Restrictions+0x178 (null => empty)
-constexpr uintptr_t kTrRequestRestrictions  = 0x13a20b0; // post-age update path (dispatches slot4)
-constexpr uintptr_t kTrComplianceFetch      = 0x13b9d68; // compliancy provider slot4 (the fetch!)
-constexpr uintptr_t kTrRestrictedSignal     = 0x13d02e8; // ProcessRestrictions "restricted mode!"
-constexpr uintptr_t kTrLegislationLoader    = 0x13d6fd8; // boot legislation loader (cache-read)
+// Round 2 (legislation hooks) DISPROVED the legislation theory: on device
+// Restrictions+0x178 is non-null and +0x218=1 (legislation initialises fine), and the
+// compliancy fetch / RequestRestrictions / restricted-mode signal NEVER fire. The real
+// symptom is a re-login loop (full re-auth every ~15s) after the HTTP chain succeeds.
+// The Gaia online layer drives the UI through three Lua callbacks — onLoginCompleted,
+// onLoginFailed(code) and onDisconnected — emitted by the bridge functions below (found
+// by the 'onLoginCompleted'/'onLoginFailed'/'onDisconnected' string xrefs). onLoginFailed
+// carries an error code in w2. We trace all three plus StartLogin to capture exactly what
+// the game decides after login and what re-triggers the loop. Continuation trampolines
+// log (label, x0, x1, x2, caller-LR) then run the original intact; all four targets have
+// position-independent prologues (checked).
+constexpr uintptr_t kTrOnLoginCompleted = 0x1354158; // Gaia -> Lua onLoginCompleted
+constexpr uintptr_t kTrOnLoginFailed    = 0x1354418; // Gaia -> Lua onLoginFailed(code in w2)
+constexpr uintptr_t kTrOnDisconnected   = 0x1353fb8; // Gaia -> Lua onDisconnected
+constexpr uintptr_t kTrStartLogin       = 0xbcd410;  // OnlineFramework StartLogin (re-login trigger)
 
 uintptr_t g_mc5_base = 0; // cached libMC5 base for LR->file-offset in trace logs
 
@@ -134,25 +132,10 @@ void mc5_iris_log_tee(void* /*ctx*/, const void* msg) {
 // disassembly address). Called from the trampoline shim with the game's x0/x1/x30
 // preserved. Runs on a normal game thread, so logi() (mutex + __android_log) is safe.
 extern "C" void mc5_trace(const char* label, unsigned long long a0, unsigned long long a1,
-                          unsigned long long lr) {
+                          unsigned long long a2, unsigned long long lr) {
     unsigned long long off = (g_mc5_base && lr >= g_mc5_base) ? (lr - g_mc5_base) : lr;
-    logi("trace: %s x0=0x%llx x1=0x%llx lr=+0x%llx", label, a0, a1, off);
-}
-
-// Specialised trace for functions whose x0 is the Restrictions object: also dumps the
-// three gate fields we care about — +0x100 (Init full-branch gate), +0x178 (legislation
-// JSON pointer; null => GetLegislationVersion returns JSON_NOT_INITIALIZED) and +0x218
-// (IsLegislationInitialized atomic flag). x0 is a valid object at these entries; guard
-// the null case only.
-extern "C" void mc5_trace_restr(const char* label, unsigned long long thisptr,
-                                unsigned long long /*a1*/, unsigned long long lr) {
-    unsigned long long off = (g_mc5_base && lr >= g_mc5_base) ? (lr - g_mc5_base) : lr;
-    if (thisptr == 0) { logi("trace: %s this=0 lr=+0x%llx", label, off); return; }
-    unsigned int f100 = *reinterpret_cast<volatile unsigned int*>(thisptr + 0x100);
-    unsigned long long p178 = *reinterpret_cast<volatile unsigned long long*>(thisptr + 0x178);
-    unsigned int f218 = *reinterpret_cast<volatile unsigned char*>(thisptr + 0x218);
-    logi("trace: %s this=0x%llx +0x100=0x%x +0x178=0x%llx +0x218=0x%x lr=+0x%llx",
-         label, thisptr, f100, p178, f218, off);
+    logi("trace: %s x0=0x%llx x1=0x%llx x2=0x%llx(w2=%u) lr=+0x%llx",
+         label, a0, a1, a2, static_cast<unsigned>(a2 & 0xffffffffu), off);
 }
 
 // Reject relocating an instruction that is PC-relative (adr/adrp, b/bl, b.cond,
@@ -198,7 +181,8 @@ int install_trace_hook(const char* label, uintptr_t vaddr, void* logger) {
     int wi_label = n; w[n++] = 0x58000000;            // ldr  x0, #label  (imm19 patched below)
     w[n++] = 0xF94003E1; // ldr  x1, [sp]        (orig x0)
     w[n++] = 0xF94007E2; // ldr  x2, [sp, #8]    (orig x1)
-    w[n++] = 0xF94027E3; // ldr  x3, [sp, #0x48] (orig lr)
+    w[n++] = 0xF9400BE3; // ldr  x3, [sp, #0x10] (orig x2)
+    w[n++] = 0xF94027E4; // ldr  x4, [sp, #0x48] (orig lr)
     int wi_log = n;   w[n++] = 0x58000009;            // ldr  x9, #logger (imm19 patched below)
     w[n++] = 0xD63F0120; // blr  x9
     w[n++] = 0xA94007E0; // ldp  x0, x1, [sp]
@@ -306,23 +290,17 @@ int install_iris_log_hook() {
     return 1;
 }
 
-int install_legislation_trace_hooks() {
+int install_login_trace_hooks() {
     uintptr_t base = so_base("libMC5.so");
     if (base == 0) { logw("trace-hooks: libMC5.so not loaded"); return 0; }
     g_mc5_base = base;
     void* gen = reinterpret_cast<void*>(&mc5_trace);
-    void* rst = reinterpret_cast<void*>(&mc5_trace_restr);
     int n = 0;
-    // Restrictions object (x0) hooks use the restr logger (dumps +0x100/+0x178/+0x218).
-    n += install_trace_hook("RestrictionsInit",      base + kTrRestrictionsInit,      rst);
-    n += install_trace_hook("GetLegislationVersion", base + kTrGetLegislationVersion, rst);
-    // Presence/path hooks use the generic logger (label + x0/x1 + caller).
-    n += install_trace_hook("ProcessCompliancy",     base + kTrProcessCompliancy,     gen);
-    n += install_trace_hook("RequestRestrictions",   base + kTrRequestRestrictions,   gen);
-    n += install_trace_hook("ComplianceFetch(slot4)",base + kTrComplianceFetch,       gen);
-    n += install_trace_hook("RestrictedSignal",      base + kTrRestrictedSignal,      gen);
-    n += install_trace_hook("LegislationLoader",     base + kTrLegislationLoader,     gen);
-    logi("trace-hooks: %d/7 legislation/restrictions entry hooks installed", n);
+    n += install_trace_hook("onLoginCompleted", base + kTrOnLoginCompleted, gen);
+    n += install_trace_hook("onLoginFailed",    base + kTrOnLoginFailed,    gen);
+    n += install_trace_hook("onDisconnected",   base + kTrOnDisconnected,   gen);
+    n += install_trace_hook("StartLogin",       base + kTrStartLogin,       gen);
+    logi("trace-hooks: %d/4 Gaia login-event entry hooks installed", n);
     return n;
 }
 
@@ -361,7 +339,7 @@ int install_iris_log_hook() {
     return 0;
 }
 
-int install_legislation_trace_hooks() {
+int install_login_trace_hooks() {
     logw("trace-hooks: no offsets for this ABI (arm64 only)");
     return 0;
 }
