@@ -192,9 +192,11 @@ int install_trace_hook(const char* label, uintptr_t vaddr, void* logger) {
     w[n++] = 0xA9447BE8; // ldp  x8, x30, [sp, #0x40]
     w[n++] = 0x910183FF; // add  sp, sp, #0x60
     for (int i = 0; i < 4; ++i) w[n++] = orig[i];     // relocated original prologue
-    w[n++] = 0x58000050; // ldr  x16, #8
+    int wi_cont = n; w[n++] = 0x58000050;             // ldr x16, #8 (imm19 patched below)
     w[n++] = 0xD61F0200; // br   x16
-    // 16-byte align the data pool, then: [cont target][label ptr][logger ptr].
+    // 16-byte align the data pool, then: [cont target][label ptr][logger ptr]. NB: capture
+    // wi_cont at emit time above — computing it as n-2 after this pad is wrong when a pad
+    // word is added (odd word count), which clobbers the br and falls through into data.
     while ((n & 1) != 0) w[n++] = 0xD503201F; // nop pad to 8-byte boundary
     int di = n;
     unsigned long long* d = reinterpret_cast<unsigned long long*>(&w[di]);
@@ -203,7 +205,6 @@ int install_trace_hook(const char* label, uintptr_t vaddr, void* logger) {
     d[2] = reinterpret_cast<unsigned long long>(logger);          // logger fn ptr
     // Patch the three ldr-literal loads. imm19 is in WORDS = (target_word - insn_word).
     // Data pool: d[0]=cont @word di, d[1]=label @word di+2, d[2]=logger @word di+4.
-    int wi_cont = n - 2; // index of `ldr x16,#8`
     w[wi_cont]  = 0x58000000u | ((static_cast<unsigned int>(di     - wi_cont ) & 0x7ffffu) << 5) | 16; // ldr x16,d[0]
     w[wi_label] = 0x58000000u | ((static_cast<unsigned int>(di + 2 - wi_label) & 0x7ffffu) << 5) | 0;  // ldr x0, d[1]
     w[wi_log]   = 0x58000000u | ((static_cast<unsigned int>(di + 4 - wi_log  ) & 0x7ffffu) << 5) | 9;  // ldr x9, d[2]
