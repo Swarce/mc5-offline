@@ -28,6 +28,7 @@ add_library(mc5server STATIC
   server/services/asset.cpp
   server/services/social.cpp
   server/services/alert.cpp
+  server/services/message.cpp
   server/services/meta.cpp
   server/services/misc.cpp
 )

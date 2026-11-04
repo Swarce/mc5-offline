@@ -33,6 +33,7 @@ void register_services(Router& router, ServerContext& ctx) {
     register_asset(router, ctx);
     register_social(router, ctx);
     register_alert(router, ctx);
+    register_message(router, ctx);
     register_misc(router, ctx); // installs the fallback
 }
 
