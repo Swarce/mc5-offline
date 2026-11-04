@@ -25,15 +25,25 @@ namespace mc5 {
 
 namespace {
 
-// Countries are matched against this list; an unlisted country falls back
+// The IRIS validator (libMC5 @0x1378bd0) requires version fields on every IRIS
+// config: config_format_version, behavioral_version AND consent_version. With any
+// missing it flags the config invalid; behavioral.json then fails BEFORE compliancy
+// is even scheduled (so compliancy.json was never fetched and legislationVersion
+// stayed empty -> Restrictions "restricted mode" -> the connection-error popup).
+// So both configs carry all three version fields (harmless extras), and compliancy
+// additionally carries a non-empty legislation that resolves to non-restricted.
+//
+// Countries are matched against the legislation list; an unlisted country falls back
 // (non-fatally) to RestOfTheWorld, so this list only needs the common cases.
 const char* kCompliancyJson =
-    "{\"LegislationVersion\":\"1.0.0\","
+    "{\"config_format_version\":\"1.0.0\",\"behavioral_version\":\"1.0.0\",\"consent_version\":\"1.0.0\","
+    "\"LegislationVersion\":\"1.0.0\","
     "\"LegislationTypes\":[\"RestOfTheWorld\"],"
     "\"RestOfTheWorld\":[\"CA\",\"US\",\"GB\",\"FR\",\"DE\",\"BR\",\"AU\",\"IN\"]}";
 
 const char* kBehavioralJson =
-    "{\"config_format_version\":\"1.0.0\",\"behavioral_version\":\"1.0.0\",\"rules\":[]}";
+    "{\"config_format_version\":\"1.0.0\",\"behavioral_version\":\"1.0.0\",\"consent_version\":\"1.0.0\","
+    "\"rules\":[]}";
 
 } // namespace
 
