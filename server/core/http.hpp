@@ -50,6 +50,11 @@ struct Response {
     std::string content_type = "application/json";
     std::string body;
     std::map<std::string, std::string> extra_headers;
+    // When true, the server treats this as a Server-Sent-Events stream: it writes
+    // the SSE headers + `body` as the initial payload, then holds the connection
+    // open emitting keep-alives (the Kairos alert stream, GET alerts/me). The
+    // client reads it as a live online connection instead of an immediate close.
+    bool stream = false;
 
     static Response json(const std::string& text, int status = 200) {
         Response r;
@@ -63,6 +68,15 @@ struct Response {
         r.status = status;
         r.content_type = "text/plain";
         r.body = text;
+        return r;
+    }
+    // A held-open Server-Sent-Events stream (initial payload optional).
+    static Response sse(const std::string& initial = ": keep-alive\n\n") {
+        Response r;
+        r.status = 200;
+        r.content_type = "text/event-stream";
+        r.body = initial;
+        r.stream = true;
         return r;
     }
 };

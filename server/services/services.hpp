@@ -86,6 +86,7 @@ void register_ecomm(Router& router, ServerContext& ctx);       // IAP store (eco
 void register_matchmaker(Router& router, ServerContext& ctx);  // quick_join_ah -> TS controller info
 void register_asset(Router& router, ServerContext& ctx);       // IRIS config assets (compliancy/behavioral)
 void register_social(Router& router, ServerContext& ctx);      // Osiris social profile (persists nickname)
+void register_alert(Router& router, ServerContext& ctx);       // Kairos held-open SSE alert stream
 void register_misc(Router& router, ServerContext& ctx);        // catch-all logger
 
 // The TS / Anubis meta-channel handler (non-HTTP). Wired onto the Server via

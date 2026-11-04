@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -149,8 +150,31 @@ void Server::serve_conn(Conn& c, const std::string& peer) {
 
         Response resp = router_.route(req);
 
-        logi("%s %s -> %d (%zu B)%s", req.method.c_str(), req.raw_target.c_str(), resp.status,
-             resp.body.size(), peer.empty() ? "" : (" [" + peer + "]").c_str());
+        logi("%s %s -> %d (%zu B)%s%s", req.method.c_str(), req.raw_target.c_str(), resp.status,
+             resp.body.size(), resp.stream ? " [stream]" : "", peer.empty() ? "" : (" [" + peer + "]").c_str());
+
+        if (resp.stream) {
+            // Server-Sent-Events: write headers + initial payload, then hold the
+            // connection open emitting keep-alives (the Kairos alert stream). The
+            // client reads a live online connection; an immediate close looked like
+            // a dropped connection and triggered the "connection error" popup.
+            std::string head = "HTTP/1.1 200 OK\r\nContent-Type: " + resp.content_type +
+                               "\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
+            if (c.write(head.data(), head.size()) <= 0) break;
+            if (!resp.body.empty() && c.write(resp.body.data(), resp.body.size()) <= 0) break;
+            const char* ka = ": keep-alive\n\n";
+            int elapsed = 0;
+            const int kMaxSeconds = 600; // client re-requests after the stream ends
+            bool alive = true;
+            while (alive && running_.load() && elapsed < kMaxSeconds) {
+                for (int s = 0; s < 20 && running_.load(); ++s) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    ++elapsed;
+                }
+                if (c.write(ka, std::strlen(ka)) <= 0) alive = false; // client closed
+            }
+            break; // stream ended; close the connection
+        }
 
         bool keep_alive = lower(req.header("connection")) != "close";
 
