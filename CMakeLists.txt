@@ -26,6 +26,7 @@ add_library(mc5server STATIC
   server/services/ecomm.cpp
   server/services/matchmaker.cpp
   server/services/asset.cpp
+  server/services/social.cpp
   server/services/meta.cpp
   server/services/misc.cpp
 )

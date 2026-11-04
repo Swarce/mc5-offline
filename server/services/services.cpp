@@ -31,6 +31,7 @@ void register_services(Router& router, ServerContext& ctx) {
     register_ecomm(router, ctx);
     register_matchmaker(router, ctx);
     register_asset(router, ctx);
+    register_social(router, ctx);
     register_misc(router, ctx); // installs the fallback
 }
 
