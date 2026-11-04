@@ -189,3 +189,40 @@ consumer** of the unresolved restrictions state — **NOT yet isolated**.
 4. Patch the legislation gate directly (riskiest; `+0x178`/`+0x218`).
 Server already serves a valid `compliancy.json` (asset.cpp) — necessary once the fetch is forced, but
 inert until something requests it.
+
+## 8. Popup is NOT legislation — it is a post-login re-login loop (2026-11-04, trace round 2)
+
+Status: **[V]** on-device entry traces (build `ab99acf`, logs `d1d16442`/`9178133b`).
+
+Round 1's §7 legislation theory is **DISPROVEN by instrumentation**:
+- `trace: RestrictionsInit this=.. +0x100=0x0 +0x178=0xb4..ec90 +0x218=0x0` then
+  `trace: GetLegislationVersion .. +0x178=0xb4..ec90 +0x218=0x1` — the legislation JSON
+  pointer (+0x178) is **non-null** and the init flag (+0x218) is **set**. Legislation
+  initialises fine. The boot `LegislationLoader 0x13d6fd8` runs (lr=+0x1396314) and
+  populates +0x178. The empty `legislationVersion` string is therefore **benign**.
+- `ComplianceFetch(slot4) 0x13b9d68`, `RequestRestrictions 0x13a20b0` and the
+  restricted-mode signal `0x13d02e8` **never fire** — so restrictions never errors and
+  the "restricted mode" popup theory is out.
+- No Gaia result code is set (0xc35cf8 silent) — confirmed again.
+
+**Real symptom:** after the HTTP login chain fully succeeds (all 200), the game does a
+full re-login (`POST /auth/authorize` scope `tracking_bi` then full scope, fresh
+users/me, social, encrypt_token) **every ~12–15s**. The OnlineFramework tears down and
+restarts the online session. The expected age/gender screen is the age gate, which runs
+via `RequestRestrictions` — and that never fires, consistent with the session never
+reaching "online ready".
+
+**Gaia → Lua login bridge (string xref):** the online layer drives the UI through three
+callbacks — `onLoginCompleted` (emitter `0x1354158`), `onLoginFailed` (emitter
+`0x1354418`, error code in `w2`), `onDisconnected` (emitter `0x1353fb8`). All three are
+vtable-dispatched state handlers (0 direct callers). `onLoginFailed` is fired by the
+login-failed state entry `0xbb96e8` (notifies observers with code 2, sets flag
+`+0x17c=1`). `StartLogin 0xbcd410` has 6 callers (initial + retry paths); the outer
+dispatcher `0xbcd660` (phase field `+0x3dc`) and per-frame tick `0xc184f8` pump it.
+
+**Open:** which of onLoginCompleted / onLoginFailed(code) / onDisconnected fires after
+the chain, and what re-triggers StartLogin — trace round 3 (build `41d9647`, hooks on
+those four) will answer. Leading hypothesis: a post-login timeout waiting for a
+real-time "connected" confirmation (the alert/presence stream only receives SSE
+*comments* from us, never a real `connection` event), producing onLoginFailed/
+onDisconnected → the connection-error popup → retry.
