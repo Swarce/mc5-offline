@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -310,10 +311,11 @@ void dump_threads(const char* reason) {
     closedir(d);
 }
 
-// Open the log-file copy at the first writable candidate. The app's external
-// files dir is preferred because it can be pulled with `adb pull` on a
-// non-rooted device; the internal data dir is the always-writable fallback.
-void open_log_copy(const std::string& data_dir) {
+// Open the log-file copy at the first writable candidate and return the chosen
+// directory (empty if none). The app's external files dir is preferred because it
+// can be pulled with `adb pull` on a non-rooted device; the internal data dir is
+// the always-writable fallback.
+std::string open_log_copy(const std::string& data_dir) {
     std::vector<std::string> dirs;
     if (!data_dir.empty()) dirs.push_back(data_dir);
 #if defined(__ANDROID__)
@@ -329,10 +331,45 @@ void open_log_copy(const std::string& data_dir) {
         Log::instance().set_logfile(path);
         if (!Log::instance().logfile_path().empty()) {
             logi("[diag] log copy: %s (adb pull this)", Log::instance().logfile_path().c_str());
-            return;
+            return dir;
         }
     }
     logw("[diag] no writable log-file location; logcat only");
+    return std::string();
+}
+
+// Tee the whole game process's logcat (same UID/PID as us, so this includes
+// libMC5 / GaiaV2 / Gameloft's own lines, not just our tag) to a pullable file.
+// This is how we see WHY the client rejects a response without the owner having
+// to run adb logcat. Best-effort: if the device denies app log access the file
+// is just empty. Capped so it can't fill storage.
+void start_logcat_capture(const std::string& dir) {
+#if defined(__ANDROID__)
+    if (dir.empty()) return;
+    std::string path = dir + "/mc5-full.log";
+    std::thread([path] {
+        char cmd[128];
+        std::snprintf(cmd, sizeof(cmd), "logcat -v time --pid=%d", getpid());
+        FILE* in = popen(cmd, "r");
+        if (!in) { logw("[diag] logcat capture: popen failed"); return; }
+        FILE* out = std::fopen(path.c_str(), "we");
+        if (!out) { pclose(in); return; }
+        logi("[diag] full game log: %s (adb pull this)", path.c_str());
+        char line[4096];
+        std::size_t total = 0;
+        while (std::fgets(line, sizeof(line), in)) {
+            std::size_t n = std::strlen(line);
+            std::fwrite(line, 1, n, out);
+            std::fflush(out);
+            total += n;
+            if (total > 16u * 1024 * 1024) break; // 16 MB cap
+        }
+        std::fclose(out);
+        pclose(in);
+    }).detach();
+#else
+    (void)dir;
+#endif
 }
 
 void init(const std::string& data_dir) {
@@ -340,7 +377,8 @@ void init(const std::string& data_dir) {
     if (!g_inited.compare_exchange_strong(expected, true)) return;
     clock_gettime(CLOCK_MONOTONIC, &g_boot);
 
-    open_log_copy(data_dir);
+    std::string dir = open_log_copy(data_dir);
+    start_logcat_capture(dir);
     install_crash_handler();
     boot_trace("diagnostics ready (crash handler + watchdog)");
     std::thread(watchdog_loop).detach();
