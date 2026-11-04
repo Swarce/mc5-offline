@@ -39,6 +39,22 @@ constexpr uintptr_t kIrisLogVaddr = 0x1386098;
 const unsigned char kIrisLogFp[16] = {0xff, 0x03, 0x01, 0xd1, 0xf3, 0x13, 0x00, 0xf9,
                                       0xfd, 0x7b, 0x03, 0xa9, 0xfd, 0xc3, 0x00, 0x91};
 
+// Gaia result/error setter (real addr, verified by disasm): void(ctx /*x0*/, code
+// /*w1*/) = { lock(*(ctx+0x48)); *(*(ctx+0x10)) = code; unlock; }. This is where the
+// connection-error popup's result code (0x1d=29) is stored. We full-replace it with
+// a faithful reimplementation that ALSO logs a non-zero code, so a device capture
+// names the exact Gaia error driving the popup. The lock/unlock are asio posix_mutex
+// members at the real addresses below (from the same disasm). The 16-byte prologue is
+// shared by many frames, so this is matched by address, not fingerprint alone.
+constexpr uintptr_t kGaiaResultVaddr = 0xc35cf8;
+constexpr uintptr_t kPosixLockVaddr = 0x4b22f0;
+constexpr uintptr_t kPosixUnlockVaddr = 0x4b2320;
+const unsigned char kGaiaResultFp[16] = {0xf5, 0x0f, 0x1d, 0xf8, 0xf4, 0x4f, 0x01, 0xa9,
+                                         0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91};
+using MutexFn = void (*)(void*);
+MutexFn g_posix_lock = nullptr;
+MutexFn g_posix_unlock = nullptr;
+
 // asio::ssl::detail::engine::verify_callback_function(int, X509_STORE_CTX*) — the
 // callback OpenSSL invokes to accept/reject the server cert. Exported (WEAK), so
 // resolved by symbol at runtime; its prologue is the fingerprint, and the patch
@@ -108,6 +124,24 @@ void mc5_iris_log_tee(void* /*ctx*/, const void* msg) {
     logi("gaia[IRIS]: %.*s", static_cast<int>(len), data);
 }
 
+// Full replacement for the Gaia result-code setter at kGaiaResultVaddr. The original
+// (verified by disasm) is exactly:
+//     lock(*(ctx+0x48));  *(*(ctx+0x10)) = code;  unlock(mutex);
+// where lock/unlock are asio posix_mutex members at kPosixLock/UnlockVaddr. We
+// replicate it byte-for-byte in behaviour and additionally log any non-zero code, so
+// a device capture names the exact Gaia error reaching the UI (e.g. the 0x1d that
+// drives the connection-error popup). Runs on a normal game thread, so logi() is safe.
+void mc5_gaia_result_tee(void* ctx, unsigned int code) {
+    if (code != 0)
+        logi("gaia-result: code=0x%x (%u) ctx=%p", code, code, ctx);
+    if (ctx == nullptr) return;
+    void* mutex = *reinterpret_cast<void**>(reinterpret_cast<char*>(ctx) + 0x48);
+    if (g_posix_lock) g_posix_lock(mutex);
+    int* slot = *reinterpret_cast<int**>(reinterpret_cast<char*>(ctx) + 0x10);
+    if (slot) *slot = static_cast<int>(code);
+    if (g_posix_unlock) g_posix_unlock(mutex);
+}
+
 } // namespace
 
 int apply_libmc5_http_patches(int http_port) {
@@ -174,6 +208,33 @@ int install_iris_log_hook() {
     return 1;
 }
 
+int install_gaia_result_hook() {
+    uintptr_t base = so_base("libMC5.so");
+    if (base == 0) { logw("gaia-result-hook: libMC5.so not loaded"); return 0; }
+    g_posix_lock = reinterpret_cast<MutexFn>(base + kPosixLockVaddr);
+    g_posix_unlock = reinterpret_cast<MutexFn>(base + kPosixUnlockVaddr);
+    void* site = reinterpret_cast<void*>(base + kGaiaResultVaddr);
+    // Match by address (this prologue is shared); verify all 16 bytes we overwrite.
+    if (std::memcmp(site, kGaiaResultFp, sizeof(kGaiaResultFp)) != 0) {
+        logw("gaia-result-hook: fingerprint mismatch at %p (got %s) — refusing", site,
+             hexpre(reinterpret_cast<unsigned char*>(site), 16).c_str());
+        return 0;
+    }
+    unsigned char tramp[16] = {0x50, 0x00, 0x00, 0x58,  // ldr x16, #8
+                               0x00, 0x02, 0x1f, 0xd6}; // br  x16
+    void* handler = reinterpret_cast<void*>(&mc5_gaia_result_tee);
+    std::memcpy(tramp + 8, &handler, sizeof(handler));
+    if (!set_prot(site, sizeof(tramp), PROT_READ | PROT_WRITE)) {
+        loge("gaia-result-hook: mprotect RW failed");
+        return 0;
+    }
+    std::memcpy(site, tramp, sizeof(tramp));
+    set_prot(site, sizeof(tramp), PROT_READ | PROT_EXEC);
+    __builtin___clear_cache(reinterpret_cast<char*>(site), reinterpret_cast<char*>(site) + sizeof(tramp));
+    logi("gaia-result-hook: installed at %p (Gaia result codes -> logcat)", site);
+    return 1;
+}
+
 int apply_libmc5_tls_bypass() {
     // Resolve the exported callback by symbol (robust); fall back to vaddr+base.
     uintptr_t addr = 0;
@@ -206,6 +267,11 @@ int apply_libmc5_tls_bypass() {
 
 int install_iris_log_hook() {
     logw("iris-log-hook: no offset for this ABI (arm64 only)");
+    return 0;
+}
+
+int install_gaia_result_hook() {
+    logw("gaia-result-hook: no offset for this ABI (arm64 only)");
     return 0;
 }
 

@@ -106,6 +106,11 @@ void start_redirect_installer(int http_port, int tls_port) {
                 // logger is a no-op), so the game names the failing discovery step.
                 install_iris_log_hook();
                 diag::boot_trace("iris log hook installed");
+                // Log every Gaia result code reaching the UI, to name the exact
+                // error behind the connection-error popup (full-replace, behaviour
+                // preserved).
+                install_gaia_result_hook();
+                diag::boot_trace("gaia result hook installed");
                 // Accept our self-signed loopback cert (client verifies otherwise).
                 apply_libmc5_tls_bypass();
                 diag::boot_trace("libMC5 tls verify bypassed");

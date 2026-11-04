@@ -32,4 +32,13 @@ int apply_libmc5_tls_bypass();
 // Eve response", …). Fingerprint-guarded; returns 1 if installed. arm64 only.
 int install_iris_log_hook();
 
+// Diagnostic: full-replaces the Gaia result-code setter (FUN @ 0xc35cf8, verified by
+// disasm) with a faithful reimplementation — lock(*(ctx+0x48)); *(*(ctx+0x10))=code;
+// unlock — that additionally logs any non-zero code, naming the exact Gaia error that
+// reaches the UI (e.g. the 0x1d behind the connection-error popup). The lock/unlock
+// are the library's own asio posix_mutex members, so behaviour is unchanged.
+// Address-matched (its prologue is shared) and fingerprint-guarded; returns 1 if
+// installed. arm64 only.
+int install_gaia_result_hook();
+
 } // namespace mc5
