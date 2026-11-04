@@ -131,3 +131,61 @@ Everything beyond (full economy, tournaments, client->server handlers, saves) is
   `gender`) are required by the loader `G:0x6e1498`.
 - Heartbeat framing / whether the client needs periodic server keepalives vs only SO_KEEPALIVE.
 - Whether the Anubis/TS side re-verifies `encrypted_access_token` or accepts any opaque token.
+
+## 7. Popup root cause — legislation/compliancy never initialized (2026-11-04, `mc5-popup-rootcause` workflow + manual verify)
+
+Status: **[V]** mechanism verified against the real `libMC5.so` (string-xref addresses are REAL
+file vaddrs via `tools/re/xref.py`, no decomp shift) and the on-device logs `12d721fe`/`7beb5d7f`
+(new build) + `a10018bd` (raw logcat).
+
+**Symptom chain:** the whole fed session completes (eve→pandora→auth→alerts SSE→users/me→
+behavioral.json 99B→social persisted→message→encrypt_token, no reloop), then a generic
+connection-error popup — instead of the first-run age/gender screen. Game-native log (tag `MC5`,
+*not* suppressed): `log-brazil : legislationVersion:` **empty**.
+
+**Root cause:** the client never fetches `compliancy.json`, so the Restrictions/legislation
+config stays uninitialized (`GetLegislationVersion 0x13d3538` reads `Restrictions+0x178` == null →
+`JSON_NOT_INITIALIZED`). `compliancy.json` and `behavioral.json` use the SAME IRIS asset engine
+(`store GetAsset 0x1385430`, URL `https://eve.gameloft.com` @0x14ad840) but via two providers with
+opposite policies:
+- **behavioral.json** — owned by an ACTIVE manager (`BehavioralMgr IRIS-Init 0x137e570`, hardcodes
+  `'behavioral.json'` @0x14a7a66, sole caller of fetch `0x1387730`). Self-downloads at boot. ✓ seen.
+- **compliancy.json** — owned by a PASSIVE adapter. Its only network path is vtable **slot4**
+  (`0x13b9d68`, sole referencer of `'compliancy.json'` @0x14a79d4 → `0x1385430`). `calls.py 0x13b9d68`
+  = **0 BL callers** → dispatched by vtable only, and nothing dispatches it pre-profile. Never seen.
+
+**Verified caller graph (`tools/re/calls.py`):**
+- `0x1385430` (fetch engine) ← exactly `{0x137e9c0 behavioral, 0x13b9d68 compliancy-slot4}`.
+- `ProcessCompliancy 0x13961e8` ← only `0xbcdab0` (login FSM state 5, handler `0xbcdd10`).
+- `Restrictions::Init 0x13c56c0` ← only `0x13961e8`.
+- `RequestRestrictions 0x13a20b0` (the only thing that dispatches compliancy slot4, via the update
+  thread `0x13cb580`) ← 7 funcs incl. `AgeValidator 0x13df5a8`; all post-age-entry.
+- At boot, `ProcessCompliancy` calls legislation loader `0x13d6fd8` (NOT a caller of `0x1385430` →
+  cache-read only) + `EnsureCompliancyLoaded 0x1395260` (provider slot3 = `HasCachedConfig 0x1384f68`,
+  local read). Neither network-fetches. Flags: `IsLegislationInitialized` reads `Restrictions+0x218`
+  (atomic, `0x1396c98`); a separate `Restrictions+0x100` (reader `0x109cdb8`) gates `Init`'s full branch.
+
+**The login FSM is NON-FATAL on this** (`0xbcdab0` state 5 `0xbcdd10`): it filters
+`ProcessCompliancy` ret (`w19==0` or `==0x29` both skip; else only stores a `'compliancy error %d'`
+telemetry string) and unconditionally advances to state 7. So the popup is raised by a **downstream
+consumer** of the unresolved restrictions state — **NOT yet isolated**.
+
+**Eliminations:** popup is NOT a Gaia result code (setter `0xc35cf8` tee silent on-device, all ops
+200), NOT the restricted-mode signal `0x389` (emission at `0x13d0810` gated by `0x13d0368 cbz` on
+`Restrictions+0x178`, so it can't fire while legislation is null).
+
+**Open (blocks the fix choice):**
+- The exact front-end branch (likely Lua/UI) that shows the popup vs the age/gender screen.
+- Under what precondition a healthy client dispatches compliancy slot4 at/near boot (is `+0x100`
+  config/response-driven? does a richer behavioral.json or a legislation-version field trigger it?).
+- Whether seeding the encrypted on-device IRIS cache (so `HasCachedConfig` succeeds) is sufficient.
+
+**Candidate fixes (ranked by project fit; none applied yet):**
+1. Find a server/response lever that makes the stock client fetch `compliancy.json` on its own
+   (cleanest; aligns with "reimplement from the client's own code, minimal patching"). Unproven it exists.
+2. Native hook to force the fetch/early `RequestRestrictions(country=CA, adult age)` so the existing
+   path populates `+0x178` (medium risk; needs valid object ptrs/args).
+3. Seed the encrypted IRIS cache with the compliancy JSON (needs matching the game's cache crypto).
+4. Patch the legislation gate directly (riskiest; `+0x178`/`+0x218`).
+Server already serves a valid `compliancy.json` (asset.cpp) — necessary once the fetch is forced, but
+inert until something requests it.
