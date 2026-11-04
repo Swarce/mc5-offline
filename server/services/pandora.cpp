@@ -15,10 +15,26 @@
 namespace mc5 {
 
 namespace {
+// The IRIS config provider (FUN_01486a28) runs the pandora/locate RESPONSE through
+// the native URL normaliser FUN_01488b50, which prepends a scheme based on the port
+// (443->https, 80->http, any-other-port->http) and expects a SCHEME-LESS host:port.
+// If we hand it a scheme-prefixed URL it finds the first ':' inside the scheme and
+// mangles it, e.g. "https://127.0.0.1:51780/asset/" -> "http://https://127.0.0.1:...",
+// whose host "https" fails to resolve ("IRIS download failed: HTTP 0", observed on
+// device). So the asset URL must be scheme-less; the normaliser then yields
+// "http://127.0.0.1:51780/asset/", which our loopback listener serves. The fed
+// services (auth/alert/message/...) consume the locate response DIRECTLY (no
+// normaliser), so they must keep an explicit scheme — only asset needs this.
+bool iris_normalized(const std::string& svc) { return svc == "asset"; }
+
 Response locate(ServerContext& ctx, const std::string& service) {
     std::string svc = service;
     if (svc.empty()) svc = "config";
-    std::string url = ctx.base_url() + svc + "/";
+    std::string url;
+    if (iris_normalized(svc))
+        url = ctx.public_host + ":" + std::to_string(ctx.port) + "/" + svc + "/"; // scheme-less
+    else
+        url = ctx.base_url() + svc + "/"; // explicit scheme (base_url ends with '/')
     return Response::text(url);
 }
 } // namespace
