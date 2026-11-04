@@ -25,4 +25,11 @@ int apply_libmc5_http_patches(int http_port);
 // applied. arm64 only. See docs/patches.md.
 int apply_libmc5_tls_bypass();
 
+// Diagnostic: replaces the Gaia "[IRISCfgProvider]" logger (a no-op in the shipped
+// release build, since its sink is null) with a trampoline that tees each discovery
+// message to logcat, so the game reports its own boot/discovery trace ("Getting
+// URLs from Eve", "Discovered Pandora URL: …", "Failed to parse Pandora URL from
+// Eve response", …). Fingerprint-guarded; returns 1 if installed. arm64 only.
+int install_iris_log_hook();
+
 } // namespace mc5

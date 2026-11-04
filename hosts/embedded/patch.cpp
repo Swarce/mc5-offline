@@ -20,13 +20,24 @@ namespace {
 // ELF vaddrs in libMC5.so 6.0.12a (arm64-v8a, build-id 475ac80e…), from our own
 // analysis of the player's library. Each is guarded by a byte fingerprint below.
 constexpr uintptr_t kEveLiteralVaddr = 0x14ad840; // "https://eve.gameloft.com\0" (25 bytes incl null)
-constexpr uintptr_t kRewritePandoraVaddr = 0xc85db0; // http->https scheme upgrade (pandora)
-constexpr uintptr_t kRewriteFederationVaddr = 0xc86020; // http->https scheme upgrade (federation)
 
 const char kEveOriginal[] = "https://eve.gameloft.com";       // 24 chars
-const unsigned char kFnPrologue[16] = {0xff, 0x03, 0x02, 0xd1, 0xf5, 0x2b, 0x00, 0xf9,
-                                       0xf4, 0x4f, 0x06, 0xa9, 0xfd, 0x7b, 0x07, 0xa9};
-const unsigned char kAarch64Ret[4] = {0xc0, 0x03, 0x5f, 0xd6};
+
+// The Gaia online layer logs its boot/discovery through an "[IRISCfgProvider]"
+// logger (FUN @ 0x1386098): void log(ctx /*x0*/, std::string& msg /*x1*/). It only
+// emits when ctx->logger (ctx+0x18) is non-null, which it is NOT in the shipped
+// release build — so the discovery trace ("Getting URLs from Eve", "Discovered
+// Pandora URL: …", "Failed to parse Pandora URL from Eve response", "Eve URLs
+// request failed: HTTP N", "Failed to find preferred datacenter", …) never reaches
+// logcat. We replace this function (a no-op in release) with a trampoline to our
+// own handler that reads the message string and tees it to logcat, so the game
+// itself tells us exactly which discovery step fails. Its real address is NOT the
+// decompiler's 0x1486098: the decomp's 0x148xxxx code addresses are shifted
+// ~+0x100000 from this build; 0x1386098 is the real entry (verified by the
+// "[IRISCfgProvider]" string xref and the prologue fingerprint below).
+constexpr uintptr_t kIrisLogVaddr = 0x1386098;
+const unsigned char kIrisLogFp[16] = {0xff, 0x03, 0x01, 0xd1, 0xf3, 0x13, 0x00, 0xf9,
+                                      0xfd, 0x7b, 0x03, 0xa9, 0xfd, 0xc3, 0x00, 0x91};
 
 // asio::ssl::detail::engine::verify_callback_function(int, X509_STORE_CTX*) — the
 // callback OpenSSL invokes to accept/reject the server cert. Exported (WEAK), so
@@ -74,6 +85,29 @@ bool patch_site(const char* name, uintptr_t addr, const unsigned char* expect,
     return true;
 }
 
+// Our replacement for the IRIS config-provider logger. Called with the game's
+// original args intact: x0 = logger context (unused), x1 = &std::string message.
+// Reads the libc++ std::string (default layout: LSB of byte 0 = is-long flag) and
+// tees it to logcat. Runs on a normal game thread (not a signal handler), so the
+// mutex/vsnprintf inside logi() are safe. Replacing the whole function is safe
+// because the original is a no-op in release (its sink pointer is null).
+void mc5_iris_log_tee(void* /*ctx*/, const void* msg) {
+    if (msg == nullptr) return;
+    const unsigned char* p = static_cast<const unsigned char*>(msg);
+    const char* data;
+    std::size_t len;
+    if (p[0] & 1) { // long representation
+        len = *reinterpret_cast<const std::size_t*>(p + 8);
+        data = *reinterpret_cast<const char* const*>(p + 16);
+    } else {        // short representation (chars inline)
+        len = p[0] >> 1;
+        data = reinterpret_cast<const char*>(p + 1);
+    }
+    if (data == nullptr) return;
+    if (len > 1024) len = 1024; // cap defensively
+    logi("gaia[IRIS]: %.*s", static_cast<int>(len), data);
+}
+
 } // namespace
 
 int apply_libmc5_http_patches(int http_port) {
@@ -102,13 +136,42 @@ int apply_libmc5_http_patches(int http_port) {
         }
     }
 
-    // 2. Neutralise the two http->https scheme rewriters (first instruction -> ret),
-    //    so the pandora/federation URLs we return stay http.
-    if (patch_site("rewrite-pandora", base + kRewritePandoraVaddr, kFnPrologue, kAarch64Ret, 4, true)) ++applied;
-    if (patch_site("rewrite-federation", base + kRewriteFederationVaddr, kFnPrologue, kAarch64Ret, 4, true)) ++applied;
-
-    logi("patch: %d/3 libMC5 http patches applied", applied);
+    // NB: the former "rewrite-pandora"/"rewrite-federation" patches (RET at
+    // 0xc85db0/0xc86020) were removed. Those offsets are real functions doing
+    // std::string work, not the http->https scheme rewriter — the actual URL
+    // normaliser is FUN_01488b50 (scheme chosen by port: 443->https, 80->http,
+    // other->http keep-port), which the eve-config URLs do NOT pass through (the
+    // pandora value is used as returned). Neutralising two misidentified functions
+    // right before pandora discovery was a prime suspect for breaking it, so we no
+    // longer touch them; any stray Gameloft host is still caught by the connect/
+    // getaddrinfo redirect.
+    logi("patch: %d/1 libMC5 http patches applied", applied);
     return applied;
+}
+
+int install_iris_log_hook() {
+    uintptr_t base = so_base("libMC5.so");
+    if (base == 0) { logw("iris-log-hook: libMC5.so not loaded"); return 0; }
+    void* site = reinterpret_cast<void*>(base + kIrisLogVaddr);
+    if (std::memcmp(site, kIrisLogFp, sizeof(kIrisLogFp)) != 0) {
+        logw("iris-log-hook: fingerprint mismatch at %p (got %s) — refusing", site,
+             hexpre(reinterpret_cast<unsigned char*>(site), 8).c_str());
+        return 0;
+    }
+    // Trampoline: ldr x16,#8 ; br x16 ; <8-byte absolute handler address>.
+    unsigned char tramp[16] = {0x50, 0x00, 0x00, 0x58,  // ldr x16, #8
+                               0x00, 0x02, 0x1f, 0xd6}; // br  x16
+    void* handler = reinterpret_cast<void*>(&mc5_iris_log_tee);
+    std::memcpy(tramp + 8, &handler, sizeof(handler));
+    if (!set_prot(site, sizeof(tramp), PROT_READ | PROT_WRITE)) {
+        loge("iris-log-hook: mprotect RW failed");
+        return 0;
+    }
+    std::memcpy(site, tramp, sizeof(tramp));
+    set_prot(site, sizeof(tramp), PROT_READ | PROT_EXEC);
+    __builtin___clear_cache(reinterpret_cast<char*>(site), reinterpret_cast<char*>(site) + sizeof(tramp));
+    logi("iris-log-hook: installed at %p (Gaia discovery trace -> logcat)", site);
+    return 1;
 }
 
 int apply_libmc5_tls_bypass() {
@@ -138,6 +201,11 @@ int apply_libmc5_http_patches(int /*http_port*/) {
 
 int apply_libmc5_tls_bypass() {
     logw("tls-bypass: no asio verify offset for this ABI (arm64 only)");
+    return 0;
+}
+
+int install_iris_log_hook() {
+    logw("iris-log-hook: no offset for this ABI (arm64 only)");
     return 0;
 }
 

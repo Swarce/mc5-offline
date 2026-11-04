@@ -54,9 +54,14 @@ void register_eve(Router& router, ServerContext& ctx) {
     });
 
     router.add("GET", "config/{clientId}/datacenters/{dc}/urls", [&ctx](const Request&) {
-        // One object of service -> "<base><service>/". No "status" key.
+        // One object of service -> "<base><service>/", plus an explicit
+        // "status":"none". The native Gaia config parses a status/code field into a
+        // ConfigStatus; "none" is the only value that shows no update/maintenance
+        // popup (any other string throws), and MCVS's known-good eve contract
+        // returns it explicitly rather than omitting it.
         const std::string base = ctx.base_url(); // ends with '/'
         Json o = Json::object();
+        o["status"] = "none";
         for (const char* svc : kEveServices) o[svc] = base + svc + "/";
         return Response::json(o.dump());
     });
