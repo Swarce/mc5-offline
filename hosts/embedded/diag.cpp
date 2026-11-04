@@ -372,6 +372,63 @@ void start_logcat_capture(const std::string& dir) {
 #endif
 }
 
+#if defined(__ANDROID__)
+// Recursively (bounded) delete the federation/IRIS URL caches under `dir`. Skips
+// the asset/texture tree so it never walks the multi-GB packs.
+void rm_caches_in(const std::string& dir, int depth, int& budget) {
+    if (depth < 0 || budget <= 0) return;
+    DIR* d = opendir(dir.c_str());
+    if (!d) return;
+    struct dirent* e;
+    std::vector<std::string> subdirs;
+    while ((e = readdir(d)) != nullptr) {
+        if (--budget <= 0) break;
+        std::string n = e->d_name;
+        if (n == "." || n == "..") continue;
+        std::string p = dir + "/" + n;
+        bool is_cache = (n == "fed_links.bin") ||
+                        (n.size() >= 10 && n.compare(n.size() - 10, 10, "_cache.bin") == 0);
+        if (is_cache) {
+            if (unlink(p.c_str()) == 0) logi("[diag] cleared stale url cache: %s", p.c_str());
+            continue;
+        }
+        if (depth > 0) {
+            if (n.rfind("data_", 0) == 0 || n.find("HighSlow") != std::string::npos ||
+                n.find("pack") != std::string::npos || n.find("obb") != std::string::npos ||
+                n.find("assets") != std::string::npos)
+                continue; // never descend into the texture/asset tree
+            struct stat st;
+            if (stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) subdirs.push_back(p);
+        }
+    }
+    closedir(d);
+    for (const std::string& s : subdirs) rm_caches_in(s, depth - 1, budget);
+}
+#endif
+
+// Delete the client's persisted federation/IRIS URL caches (fed_links.bin,
+// *_cache.bin) so the game re-discovers from our CURRENT eve/pandora responses
+// instead of replaying a URL cached by an earlier build. Fixes the stale
+// "https://.../asset/" that the IRIS normaliser mangles into "http://https://...".
+// Runs in-process (same UID) before libMC5's online init reads the cache.
+void clear_stale_url_caches(const std::string& data_dir) {
+#if defined(__ANDROID__)
+    std::vector<std::string> dirs;
+    if (!data_dir.empty()) dirs.push_back(data_dir);
+    const char* kPkg = "com.gameloft.android.ANMP.GloftM5HM";
+    dirs.push_back(std::string("/data/data/") + kPkg + "/files");
+    dirs.push_back(std::string("/data/user/0/") + kPkg + "/files");
+    dirs.push_back(std::string("/sdcard/Android/data/") + kPkg + "/files");
+    int budget = 4000;
+    for (std::string dir : dirs) {
+        if (!dir.empty() && dir.back() == '/') dir.pop_back();
+        rm_caches_in(dir, 2, budget);
+    }
+#else
+    (void)data_dir;
+#endif
+}
+
 void init(const std::string& data_dir) {
     bool expected = false;
     if (!g_inited.compare_exchange_strong(expected, true)) return;
@@ -379,6 +436,7 @@ void init(const std::string& data_dir) {
 
     std::string dir = open_log_copy(data_dir);
     start_logcat_capture(dir);
+    clear_stale_url_caches(data_dir);
     install_crash_handler();
     boot_trace("diagnostics ready (crash handler + watchdog)");
     std::thread(watchdog_loop).detach();
