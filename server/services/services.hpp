@@ -55,7 +55,10 @@ private:
 
 struct ServerContext {
     std::string client_id = "1924:56128:6.0.12a:android:googleplay";
-    std::string data_center = "mc5";
+    // "eur" matches the datacenter MC5 clients persist from pre-shutdown online
+    // play (observed on device); advertising a different name made the native
+    // online init churn instead of settling. Overridable via --data-center.
+    std::string data_center = "eur";
     std::string public_host = "127.0.0.1";
     int port = 51780;
     // Scheme we advertise in eve/urls and pandora/locate. Plain http for the
