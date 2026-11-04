@@ -19,7 +19,11 @@ Device-test history and the current state. Newest first.
   The eve http patch + scheme-rewrite neutralisation stay (http still works; https now also does).
 * Diagnostics extended: the listener logs a TLS ClientHello, and the redirect logs every libMC5
   connect (host:port). Shipped as an inherited base+config update (keeps the installed asset packs).
-  Next: confirm the Federation chain is exercised on-device, then M1 (answer the campaign requests).
+* **Second on-device run:** the connect log showed the game reaching **public AWS IPs on :443**
+  directly — libcurl resolves via c-ares, bypassing the `getaddrinfo` hook — and the loopback TLS
+  handshake **reset** (`-0x0050`, `NET_CONN_RESET`). Two follow-ups: (1) the `connect` hook now
+  redirects **any** :443/:80 (public IP or loopback) to our server, resolver-proof; (2) TLS pinned
+  to 1.2 with full mbedTLS handshake logging to pin down the reset. Awaiting the next log.
 
 ## October 2026: M0.5 diagnostics (host-verified, no device yet)
 

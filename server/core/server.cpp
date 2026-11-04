@@ -241,8 +241,8 @@ void Server::accept_loop() {
         TlsUpgrade up = is_tls ? tls_upgrade_ : TlsUpgrade{};
         std::thread([this, fd, peer_str, up] {
             if (up) {
-                std::unique_ptr<Conn> c = up(fd); // TLS handshake
-                if (!c) { ::close(fd); return; }
+                std::unique_ptr<Conn> c = up(fd); // TLS handshake; owns fd
+                if (!c) return;                   // up() already closed fd on failure
                 serve_conn(*c, peer_str);
             } else {
                 FdConn c(fd);

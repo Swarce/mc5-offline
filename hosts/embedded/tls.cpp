@@ -6,6 +6,7 @@
 #include <mutex>
 
 #include <mbedtls/ctr_drbg.h>
+#include <mbedtls/debug.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/error.h>
 #include <mbedtls/net_sockets.h>
@@ -29,6 +30,18 @@ mbedtls_ctr_drbg_context* g_drbg = nullptr;
 int locked_rng(void* p, unsigned char* out, std::size_t len) {
     std::lock_guard<std::mutex> g(g_rng_mu);
     return mbedtls_ctr_drbg_random(p, out, len);
+}
+
+// mbedTLS internal debug -> logcat, so a failed handshake says why (chosen
+// version/cipher, the alert received, how far it got).
+void tls_dbg(void*, int level, const char*, int, const char* str) {
+    std::size_t n = std::strlen(str);
+    if (n && str[n - 1] == '\n') --n;
+    char buf[256];
+    if (n > sizeof(buf) - 1) n = sizeof(buf) - 1;
+    std::memcpy(buf, str, n);
+    buf[n] = '\0';
+    logd("mbedtls(%d): %s", level, buf);
 }
 
 // Process-wide server TLS context (cert, key, config), built once.
@@ -67,6 +80,13 @@ struct TlsServer {
 
         mbedtls_ssl_conf_rng(&conf, locked_rng, &drbg);
         mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE); // no client cert
+        // Force TLS 1.2: universally supported by this era of client, and avoids
+        // any 1.3-only negotiation quirks while we bring the transport up.
+        mbedtls_ssl_conf_min_tls_version(&conf, MBEDTLS_SSL_VERSION_TLS1_2);
+        mbedtls_ssl_conf_max_tls_version(&conf, MBEDTLS_SSL_VERSION_TLS1_2);
+        // Log handshake internals so a reset/alert is explained in logcat.
+        mbedtls_ssl_conf_dbg(&conf, tls_dbg, nullptr);
+        mbedtls_debug_set_threshold(3);
         r = mbedtls_ssl_conf_own_cert(&conf, &cert, &key);
         if (r != 0) { loge("tls: conf_own_cert failed -0x%04x", -r); return; }
 
@@ -147,8 +167,14 @@ private:
 } // namespace
 
 std::unique_ptr<Conn> tls_upgrade(int fd) {
-    if (!server().ok) { loge("tls: server context not ready; dropping TLS connection"); return nullptr; }
-    auto c = std::make_unique<TlsConn>(fd);
+    // tls_upgrade owns fd: on any failure it closes fd and returns null, so the
+    // caller must NOT close fd when null comes back.
+    if (!server().ok) {
+        loge("tls: server context not ready; dropping TLS connection");
+        ::close(fd);
+        return nullptr;
+    }
+    auto c = std::make_unique<TlsConn>(fd); // ~TlsConn closes fd if handshake failed
     if (!c->ok()) return nullptr;
     return c;
 }

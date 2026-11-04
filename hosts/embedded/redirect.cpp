@@ -56,17 +56,24 @@ int my_connect(int fd, const struct sockaddr* addr, socklen_t len) {
             inet_ntop(AF_INET, &in->sin_addr, ips, sizeof(ips));
             logd("redirect: libMC5 connect -> %s:%u", ips, ntohs(in->sin_port));
         }
-        if (in->sin_addr.s_addr == htonl(INADDR_LOOPBACK)) {
-            uint16_t port = ntohs(in->sin_port);
-            int target = 0;
-            if (port == 443) target = g_tls_port.load();
-            else if (port == 80) target = g_http_port.load();
-            if (target != 0) {
-                sockaddr_in red = *in;
-                red.sin_port = htons(static_cast<uint16_t>(target));
-                logd("redirect: connect 127.0.0.1:%u -> :%d", port, target);
-                return ::connect(fd, reinterpret_cast<sockaddr*>(&red), sizeof(red));
-            }
+        // Redirect ANY connect to :443/:80 — loopback or a public IP — to our
+        // loopback server. The game resolves its backend hosts via libcurl's own
+        // resolver (c-ares), bypassing our getaddrinfo hook, then connects by IP
+        // to the real (dead) servers; catching it at connect() is resolver-proof.
+        // The game is meant to be fully offline, so all http(s) belongs to us.
+        uint16_t port = ntohs(in->sin_port);
+        int target = 0;
+        if (port == 443) target = g_tls_port.load();
+        else if (port == 80) target = g_http_port.load();
+        if (target != 0) {
+            char ips[64] = {0};
+            inet_ntop(AF_INET, &in->sin_addr, ips, sizeof(ips));
+            sockaddr_in red = *in;
+            red.sin_family = AF_INET;
+            red.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            red.sin_port = htons(static_cast<uint16_t>(target));
+            logd("redirect: %s:%u -> 127.0.0.1:%d", ips, port, target);
+            return ::connect(fd, reinterpret_cast<sockaddr*>(&red), sizeof(red));
         }
     }
     return ::connect(fd, addr, len);
