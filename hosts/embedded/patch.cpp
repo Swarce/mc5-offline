@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <dlfcn.h>
 #include <string>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -26,6 +27,17 @@ const char kEveOriginal[] = "https://eve.gameloft.com";       // 24 chars
 const unsigned char kFnPrologue[16] = {0xff, 0x03, 0x02, 0xd1, 0xf5, 0x2b, 0x00, 0xf9,
                                        0xf4, 0x4f, 0x06, 0xa9, 0xfd, 0x7b, 0x07, 0xa9};
 const unsigned char kAarch64Ret[4] = {0xc0, 0x03, 0x5f, 0xd6};
+
+// asio::ssl::detail::engine::verify_callback_function(int, X509_STORE_CTX*) — the
+// callback OpenSSL invokes to accept/reject the server cert. Exported (WEAK), so
+// resolved by symbol at runtime; its prologue is the fingerprint, and the patch
+// makes it `return 1` (accept any cert). kAsioVerifyVaddr is the fallback offset.
+const char kAsioVerifySym[] =
+    "_ZN4asio3ssl6detail6engine24verify_callback_functionEiP17x509_store_ctx_st";
+const unsigned char kAsioVerifyFp[8] = {0xf5, 0x0f, 0x1d, 0xf8, 0xf4, 0x4f, 0x01, 0xa9};
+const unsigned char kAsioVerifyAccept[8] = {0x20, 0x00, 0x80, 0x52,  // mov w0, #1
+                                            0xc0, 0x03, 0x5f, 0xd6}; // ret
+constexpr uintptr_t kAsioVerifyVaddr = 0x1252c70;
 
 bool set_prot(void* addr, std::size_t len, int prot) {
     long ps = sysconf(_SC_PAGESIZE);
@@ -99,10 +111,33 @@ int apply_libmc5_http_patches(int http_port) {
     return applied;
 }
 
+int apply_libmc5_tls_bypass() {
+    // Resolve the exported callback by symbol (robust); fall back to vaddr+base.
+    uintptr_t addr = 0;
+    if (void* h = dlopen("libMC5.so", RTLD_NOLOAD | RTLD_NOW)) {
+        addr = reinterpret_cast<uintptr_t>(dlsym(h, kAsioVerifySym));
+        dlclose(h);
+    }
+    if (addr == 0) {
+        uintptr_t base = so_base("libMC5.so");
+        if (base) addr = base + kAsioVerifyVaddr;
+        logd("tls-bypass: dlsym miss, using vaddr fallback (base=%p)", reinterpret_cast<void*>(base));
+    }
+    if (addr == 0) { logw("tls-bypass: asio verify callback not found"); return 0; }
+    bool ok = patch_site("asio-verify-accept", addr, kAsioVerifyFp, kAsioVerifyAccept, 8, true);
+    if (ok) logi("tls-bypass: server-cert verification neutralised (asio verify -> accept)");
+    return ok ? 1 : 0;
+}
+
 #else // non-arm64
 
 int apply_libmc5_http_patches(int /*http_port*/) {
     logw("patch: no libMC5 http-patch offsets for this ABI (arm64 only); https path unpatched");
+    return 0;
+}
+
+int apply_libmc5_tls_bypass() {
+    logw("tls-bypass: no asio verify offset for this ABI (arm64 only)");
     return 0;
 }
 

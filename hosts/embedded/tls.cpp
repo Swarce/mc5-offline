@@ -84,9 +84,10 @@ struct TlsServer {
         // any 1.3-only negotiation quirks while we bring the transport up.
         mbedtls_ssl_conf_min_tls_version(&conf, MBEDTLS_SSL_VERSION_TLS1_2);
         mbedtls_ssl_conf_max_tls_version(&conf, MBEDTLS_SSL_VERSION_TLS1_2);
-        // Log handshake internals so a reset/alert is explained in logcat.
+        // Log handshake errors/alerts (level 1): quiet on success, still names a
+        // fatal alert if one is received. Raise to 3 for full handshake tracing.
         mbedtls_ssl_conf_dbg(&conf, tls_dbg, nullptr);
-        mbedtls_debug_set_threshold(3);
+        mbedtls_debug_set_threshold(1);
         r = mbedtls_ssl_conf_own_cert(&conf, &cert, &key);
         if (r != 0) { loge("tls: conf_own_cert failed -0x%04x", -r); return; }
 

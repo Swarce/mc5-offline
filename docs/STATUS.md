@@ -23,7 +23,14 @@ Device-test history and the current state. Newest first.
   directly — libcurl resolves via c-ares, bypassing the `getaddrinfo` hook — and the loopback TLS
   handshake **reset** (`-0x0050`, `NET_CONN_RESET`). Two follow-ups: (1) the `connect` hook now
   redirects **any** :443/:80 (public IP or loopback) to our server, resolver-proof; (2) TLS pinned
-  to 1.2 with full mbedTLS handshake logging to pin down the reset. Awaiting the next log.
+  to 1.2 with full mbedTLS handshake logging to pin down the reset.
+* **Third on-device run:** the trace was decisive — our server completes the whole handshake,
+  then the client sends a fatal **`unknown_ca`** alert (48). The Gaia client is **Boost.Asio +
+  OpenSSL** and it **verifies** the server cert (recon was wrong that TLS verification is off).
+  Fix: patch the exported asio verify callback (`…engine::verify_callback_function`) to accept
+  any cert — in-memory, fingerprint-checked, resolved by symbol ([patches.md](patches.md) #4);
+  mbedTLS logging dropped to level 1. Awaiting the next log: TLS should now complete and
+  eve/pandora/auth should reach the server (`GET … -> 200`).
 
 ## October 2026: M0.5 diagnostics (host-verified, no device yet)
 

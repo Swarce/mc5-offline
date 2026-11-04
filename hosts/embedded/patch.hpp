@@ -18,4 +18,11 @@ namespace mc5 {
 // (applied / fingerprint-mismatch / unsupported ABI).
 int apply_libmc5_http_patches(int http_port);
 
+// Neutralises the game's TLS server-certificate verification so our self-signed
+// loopback cert is accepted (the client otherwise rejects it with a fatal
+// unknown_ca alert). Patches the exported asio::ssl verify callback to return
+// "accept", resolved by symbol at runtime (robust across builds). Returns 1 if
+// applied. arm64 only. See docs/patches.md.
+int apply_libmc5_tls_bypass();
+
 } // namespace mc5

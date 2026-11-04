@@ -102,6 +102,9 @@ void start_redirect_installer(int http_port, int tls_port) {
                 // rewrite (M0 transport: plain http on loopback, no TLS).
                 apply_libmc5_http_patches(g_http_port.load());
                 diag::boot_trace("libMC5 http patches applied");
+                // Accept our self-signed loopback cert (client verifies otherwise).
+                apply_libmc5_tls_bypass();
+                diag::boot_trace("libMC5 tls verify bypassed");
                 // Backstop for any host not reached through our returned URLs.
                 install_now();
                 diag::boot_trace("GOT hooks installed");
