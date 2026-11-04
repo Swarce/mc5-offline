@@ -28,13 +28,14 @@
 namespace mc5 {
 
 namespace {
-// Non-fed services the client reads straight from eve's urls object; fed services
-// are located via pandora. This matches the known-good MCVS eve contract. (A full
-// superset was tried and regressed the native parse, so keep it to the non-fed
-// set.) "federation" is kept too: native Gaia reads it alongside "pandora".
+// The native pandora-discovery parser reads the urls object into a fixed ~1 KB
+// buffer and fails (connection-error 0x1d) if it overruns — the 8-key response
+// (405 B) was enough to break it while the small datacenters array parsed fine.
+// So keep this to the minimum login needs: "pandora" (service discovery) and
+// "ecomm_api_root"/"crm_iap" (IAP init throws without them); "federation" too.
+// Everything else (auth, storage, game_portal, …) is located via pandora/locate.
 const char* kEveServices[] = {
-    "pandora", "federation", "game_portal", "ads_agency",
-    "marketing_site", "ecomm_api_root", "crm_iap", "etsv2",
+    "pandora", "federation", "ecomm_api_root", "crm_iap",
 };
 } // namespace
 
