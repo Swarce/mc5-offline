@@ -28,20 +28,13 @@
 namespace mc5 {
 
 namespace {
-// The full service map. MCVS's C# client reads only the non-fed services here and
-// locates fed services via pandora, but MC5's Gaia is fully native and the native
-// init may expect every service URL straight from eve config; a superset is safe
-// (every key just becomes Services[key]=url) and avoids the init stalling before
-// it reaches pandora/auth. Union of fed + eve + native services (+ federation).
+// Non-fed services the client reads straight from eve's urls object; fed services
+// are located via pandora. This matches the known-good MCVS eve contract. (A full
+// superset was tried and regressed the native parse, so keep it to the non-fed
+// set.) "federation" is kept too: native Gaia reads it alongside "pandora".
 const char* kEveServices[] = {
-    // fed services (also locatable via pandora)
-    "auth", "storage", "leaderboard", "alert", "config", "groupchat", "lobby",
-    "matchmaker", "message", "social", "asset", "game_stats",
-    // eve-served (non-fed)
-    "pandora", "federation", "game_portal", "ads_agency", "marketing_site",
-    "ecomm_api_root", "crm_iap", "etsv2",
-    // native-only services
-    "feeds", "lottery", "voice", "schedule", "globalidservice", "transaction",
+    "pandora", "federation", "game_portal", "ads_agency",
+    "marketing_site", "ecomm_api_root", "crm_iap", "etsv2",
 };
 } // namespace
 

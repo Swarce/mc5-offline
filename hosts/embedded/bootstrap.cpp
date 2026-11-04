@@ -40,11 +40,14 @@ void start_locked(const std::string& data_dir) {
     mc5::diag::boot_trace("server starting");
 
     g_ctx = std::make_unique<mc5::ServerContext>();
-    // Embedded build serves the game over loopback. TLS (scheme https) is wired in
-    // M0.3; until then the server listens plain and is only reached by our tools.
+    // Serve the game over loopback. scheme=https: the native Gaia rewrites its
+    // service URLs http->https at runtime and expects https, so the URLs we hand
+    // out in eve config / pandora locate must be https (our one listener on 51780
+    // auto-detects TLS vs plain, so https on :51780 is served fine). Giving it
+    // http URLs made OpenSession reject the config (the "connection error" popup).
     g_ctx->public_host = "127.0.0.1";
     g_ctx->port = 51780;
-    g_ctx->scheme = "http";
+    g_ctx->scheme = "https";
 
     mc5::ServerConfig cfg;
     cfg.bind = "127.0.0.1";
