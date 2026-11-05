@@ -65,6 +65,13 @@ constexpr uintptr_t kTrStartLogin       = 0xbcd410;  // OnlineFramework StartLog
 constexpr uintptr_t kTrLoginFSM   = 0xbcdab0;   // Gaia login/update FSM pump
 constexpr uintptr_t kFsmStateWord = 0x1bc434c;  // FSM state global (int)
 
+// Round 5 (runtime campaign): the connected-gate (+0xEC) advanced the FSM to state 9 but
+// did not fire onLoginCompleted; the popup persisted. +0xEC is set by the connection-state
+// handler 0xb00508 (handler(this, msg); msg[0xe] u8, msg[0xf] u8) via setter 0x707a90.
+// Hook 0xb00508 to learn whether this handler EVER fires and, via its caller-LR, what
+// delivers the connection-state message (invisible to static analysis — bound callback).
+constexpr uintptr_t kTrConnHandler = 0xb00508;  // connection-state handler (sets +0xEC path)
+
 uintptr_t g_mc5_base = 0; // cached libMC5 base for LR->file-offset in trace logs
 
 // asio::ssl::detail::engine::verify_callback_function(int, X509_STORE_CTX*) — the
@@ -175,6 +182,24 @@ extern "C" void mc5_trace_fsm(const char* /*label*/, unsigned long long /*a0*/,
     last = st;
     unsigned long long off = (lr >= g_mc5_base) ? (lr - g_mc5_base) : lr;
     logi("fsm-state: %d (pump lr=+0x%llx)", st, off);
+}
+
+// Connection-state handler 0xb00508(this /*x0*/, msg /*x1*/): logs the message's byte
+// fields ([0xe]=error?, [0xf]=connected-type?) and the caller-LR, which identifies the
+// message source we could not resolve statically. msg may be null; guard it.
+extern "C" void mc5_trace_conn(const char* /*label*/, unsigned long long /*x0*/,
+                               unsigned long long msg, unsigned long long /*x2*/,
+                               unsigned long long lr) {
+    unsigned long long off = (g_mc5_base && lr >= g_mc5_base) ? (lr - g_mc5_base) : lr;
+    unsigned e = 0, f = 0, a = 0, c = 0;
+    if (msg) {
+        a = *reinterpret_cast<volatile unsigned short*>(msg + 0x0a);
+        c = *reinterpret_cast<volatile unsigned short*>(msg + 0x0c);
+        e = *reinterpret_cast<volatile unsigned char*>(msg + 0x0e);
+        f = *reinterpret_cast<volatile unsigned char*>(msg + 0x0f);
+    }
+    logi("conn-handler: msg=0x%llx [0xa]=%u [0xc]=%u [0xe]=%u [0xf]=%u lr=+0x%llx",
+         msg, a, c, e, f, off);
 }
 
 // Reject relocating an instruction that is PC-relative (adr/adrp, b/bl, b.cond,
@@ -342,7 +367,8 @@ int install_login_trace_hooks() {
     n += install_trace_hook("onDisconnected",   base + kTrOnDisconnected,   gen);
     n += install_trace_hook("StartLogin",       base + kTrStartLogin,       gen);
     n += install_trace_hook("LoginFSM",         base + kTrLoginFSM,         fsm);
-    logi("trace-hooks: %d/5 Gaia login-event entry hooks installed", n);
+    n += install_trace_hook("ConnHandler",      base + kTrConnHandler,      reinterpret_cast<void*>(&mc5_trace_conn));
+    logi("trace-hooks: %d/6 Gaia login-event entry hooks installed", n);
     return n;
 }
 

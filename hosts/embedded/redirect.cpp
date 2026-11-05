@@ -111,11 +111,10 @@ void start_redirect_installer(int http_port, int tls_port) {
                 // preserved).
                 install_login_trace_hooks();
                 diag::boot_trace("login trace hooks installed");
-                // Force the login "connected" gate true so login reaches its success
-                // terminal (state 9 -> onLoginCompleted) instead of the stuck state that
-                // drives popupConnectionLost + the re-login loop. See docs/research/02 §10.
-                apply_libmc5_connected_gate();
-                diag::boot_trace("connected gate forced");
+                // NB: apply_libmc5_connected_gate() (force +0xEC true) is intentionally
+                // NOT called — it advanced the auth FSM to state 9 but did not satisfy the
+                // top-level onLoginCompleted latch (popup persisted behind a black menu),
+                // so we reverted to a clean base. The function is kept for reference.
                 // Accept our self-signed loopback cert (client verifies otherwise).
                 apply_libmc5_tls_bypass();
                 diag::boot_trace("libMC5 tls verify bypassed");
