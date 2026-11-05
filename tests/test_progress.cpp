@@ -260,7 +260,14 @@ int main() {
         CHECK_EQ(pr.status()["credits"].as_int(), 2000000);
         CHECK(!pr.redeem("NOTACODE").valid);
         CHECK(!pr.redeem("").valid);
-        // No item universe yet: invalid and NOT consumed.
+        // Classes need no dump (the 11 class names are the client's own identifiers).
+        mc5::RedeemOutcome cl = pr.redeem("UNLOCKCLASSES");
+        CHECK(cl.valid);
+        CHECK_EQ(cl.items, 11);
+        Json cj;
+        CHECK(decode_grant(cl.frames.at(0), cj));
+        CHECK_EQ(cj["tracker"].as_int(), 1);
+        // No weapon list yet: invalid and NOT consumed.
         mc5::RedeemOutcome w = pr.redeem("UNLOCKWEAPONS");
         CHECK(!w.valid);
         mc5::ItemUniverse u;
@@ -271,17 +278,24 @@ int main() {
         pr.set_universe(u);
         w = pr.redeem("UNLOCKWEAPONS");
         CHECK(w.valid);
-        CHECK_EQ(w.items, 902);
+        CHECK_EQ(w.items, 900); // the universe's classes are already owned
         CHECK_EQ(w.frames.size(), std::size_t(3)); // 400-key batches
         Json b0;
         CHECK(decode_grant(w.frames[0], b0));
-        CHECK_EQ(b0.items().front().first, std::string("assault")); // prerequisites first
-        CHECK_EQ(w.reply54, std::string("{\"shop_name\":\"heavy\",\"qty\":1}"));
+        CHECK_EQ(b0.items().front().first, std::string("wpn_0"));
+        CHECK(w.reply54.empty()); // "heavy" is in the catalog but was not granted now
         CHECK(!pr.redeem("UNLOCKWEAPONS").valid);
-        // UNLOCKCLASSES: everything owned -> valid, nothing to send.
-        mc5::RedeemOutcome c = pr.redeem("UNLOCKCLASSES");
+        // UNLOCKCLASSES2: everything owned -> valid, nothing to send.
+        mc5::RedeemOutcome c = pr.redeem("UNLOCKCLASSES2");
         CHECK(c.valid);
         CHECK(c.frames.empty());
+        // The popup names a granted catalog item only.
+        mc5::ItemUniverse u2 = u;
+        u2.groups["camos"] = {"camo_a", "camo_b"};
+        u2.catalog.insert("camo_b");
+        pr.set_universe(u2);
+        mc5::RedeemOutcome cm = pr.redeem("UNLOCKCAMOS");
+        CHECK_EQ(cm.reply54, std::string("{\"shop_name\":\"camo_b\",\"qty\":1}"));
         // The big profile now needs the LZ4 frame and still round-trips.
         std::string why;
         pr.on_age(25, 1);

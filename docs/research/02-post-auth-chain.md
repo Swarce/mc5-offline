@@ -664,3 +664,58 @@ The player then:
   | 0x66 | empty |
 
 The `mc5-progression-unlocks` workflow is mapping all of these, together with the TCP_Profile schema and an MCVS-style unlock-code design.
+
+## 19. M2: the save, the Profile → stats crash, mission replies, BALD, and unlock codes (2026-11-05)
+
+Full reference: [04-progression.md](04-progression.md). Player-facing: [../ECONOMY.md](../ECONOMY.md).
+
+**The Profile → stats crash is our empty TCP_Config, not the missing profile.**
+- The fault `ldp x8,x9,[x0]` at `0x95e6ec` (x0 = 0, x1 = 2) is in the stats page builder `0x95cb20`. Its loop over levels 2..max calls the level-up rewards accessor `0x628af8`.
+- That accessor returns the begin pointer of the table at `cfg+0x5f8`. Only `0x614c78` sizes the table, from `game["_level_up_rewards"]`, and only the config parser `0x607270` calls it.
+- With our `"{}"`, the parser returns at `0x607388` (`root["game"]` is null), so the begin pointer stays NULL.
+- **Fix (two layers):**
+  1. The login TCP_Config is now `{"game":{"_level_up_rewards":[{}]}}`.
+  2. Patch 5 ([../patches.md](../patches.md)) makes the accessor return an empty range for an unsized table.
+
+**There is no client save.**
+- The app constructor hard-sets the "TS online" byte (`0x4e2510`). The client uploads deltas over TS and expects the whole document back as TCP_Profile at login.
+- The server now keeps that document (`server/services/profile.*`, `<files>/MC5Offline/`). It sends it only when:
+  - InitSettings has `gate5a = 1`;
+  - a save exists and its age gate has passed (first runs send none, the device-proven path);
+  - the render passes the type validator.
+- **Crash guard.** Two launches in a row that die before the client is confirmed alive switch the profile send off.
+
+**Replies the client waits for:**
+- `0x11` mission end → `0x12 str {"xp":X,"sp":Y}`. The outcome controller `0x80ef40` waits for it with no timeout; this is why the mission-end stats screen never loaded. The reply is sent on every receipt, but applied once per distinct payload (the client re-sends `0x11` after a TS reset).
+- `0x06` level data → `07 u32 0` ("no server copy", local packs). This removes the 15 s level-load wait.
+
+**BALD storm.**
+- The runtime-DLC worker `G:0x1373a00` retries any failure every ~21 ms forever.
+- We now serve three assets:
+  - the index `"1"`;
+  - a toc with one asset, `bald_<n>_map_android_dlc_1`;
+  - that asset itself, the 6-byte `<dlc/>`.
+- The DLC state then parks. This is guarded the same way as the profile send.
+
+**Currencies:**
+- in-game Credits = inventory item `diamond_dust`;
+- in-game Gold = inventory item `credits`;
+- `-1` is the SWF top bar's placeholder before the native side sends anything.
+
+**Unlock codes (MCVS style):**
+- MC5's own Redeem button (Settings, bottom row) sends TS `0x53 str code`. The server answers:
+  - `0x45`/`0x46` inventory pushes (F1..F4 = 0, `{"<item>":count}`, ≤ 400 keys each);
+  - plus `0x54` (a reward popup only for an item the shop catalog defines, because `RedeemRewardPopup 0x9624e8` dereferences the catalog entry unchecked), or `0x54 "null"` for an invalid code.
+- Ownership predicates read only inventory counts, never the catalog:
+  - class = an item named after the class (`0x5d47b0 → 0x5e5c90`);
+  - weapon = the base weapon name (`0x5d0d30`; count − 1 = mk level);
+  - attachment = `"<weapon>#<attachment>"` (`0x5d6a18`);
+  - camo = `0x5d5d70`; trinket, mask and body pieces work the same way.
+- Class names are the client's own 11 identifiers. All other item names are read at runtime from the player's own in-memory armory.
+
+**Expected on the next device log:**
+- `login: TCP_Config {"game":…}; TCP_Profile not sent (first run …)` on the first launch of this build, `SENT` on later ones.
+- `0x12 mission result` after a mission, and the stats screen loads.
+- `asset: BALD … index -> 200 "1"`, then toc, then map, and no storm.
+- Profile → stats opens.
+- `REDEEM 'UNLOCKCLASSES' -> OK` with an `0x45 inventory grant`.

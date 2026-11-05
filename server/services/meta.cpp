@@ -20,9 +20,19 @@
 //       binary until the client's first TS frame (always 0x01 ClientSendInitSettings)
 //       arrives: until then the bytes land in the controller reader's buffer and are
 //       lost, and every client TS send (0xc0be30) proves the TS reader is live.
-//       Then one 29-byte burst sets the four flags state 10 (0xc07740) waits for:
+//       Then one login burst (one write) sets the four flags state 10 (0xc07740)
+//       waits for, with the player's save inserted:
 //         22 00 03                          -> +0xb0, +0xb2           (0xc09da4)
-//         3e 00 09 | blob32 "{}"            -> +0xb3 TCP_Config plain (0xc0b1a8)
+//         3e 00 2a | blob32 {"game":{"_level_up_rewards":[{}]}}
+//                                           -> +0xb3 TCP_Config plain (0xc0b1a8).
+//                                              NOT "{}": the config parser 0x607270
+//                                              returns at 0x607388 without "game", the
+//                                              level-up table stays unsized, and
+//                                              Profile->stats crashed at 0x95e6ec.
+//         [03 | blob32 profile JSON, or 27 | blob32 LZ4] -> TCP_Profile, only when
+//                                              the client asks (InitSettings gate5a=1)
+//                                              and a save with a passed age gate exists
+//                                              (profile.cpp; first runs send none)
 //         04 00 0a | u8 0 | blob32 "[]"     -> event 2 -> +0xb1 (TCP_Tournaments,
 //                                              main-thread pump 0xc05e50 -> 0xc05850)
 //         4a 00 07 | u32 0                  -> +0x83, +0xb4           (0xc0adf8)
@@ -30,12 +40,17 @@
 //       silence, so we send the no-op frame 02 00 03 every 5 s (type 2 hits the
 //       handler's default case 0xc0b5a4; the prologue refreshes +0x3c for every
 //       frame) and never close the socket ourselves.
+//   (C) Progression (docs/research/04-progression.md): the client uploads deltas and
+//       the save (Progress, profile.cpp) applies them. Replies: 0x06 -> 07 u32 0
+//       (level data: use the local packs), 0x11 -> 0x12 str {"xp","sp"} (the
+//       mission-end screen waits for it with no timeout), 0x21/0x96 -> 0x22,
+//       0x49 -> 0x4a, 0x53 redeem code -> 0x45/0x46 grants + 0x54 (or 0x54 "null").
 //
 // NEVER send: 0x3a (integrity), 0x20 (switches to the 180 s/atsv path), 0x33,
-// 0x0d/0x3c with JSON (kick/ban), a 0x3e/0x3f payload of exactly "ERR". A
-// TCP_Profile (0x03 / 0x27) is not needed for the gate and stays off until its
-// loaders are verified (env MC5_TS_PROFILE=1 enables it for experiments).
-// See docs/research/02-post-auth-chain.md §15 and docs/protocol/tcp-messages.md.
+// 0x0d/0x3c with JSON (kick/ban), a 0x3e/0x3f payload of exactly "ERR" (or ""),
+// S->C 0x10/0x2d with u32 != 0, a TCP_Profile mid-session (a load resets age and
+// inventory), or 0x45/0x46 with F1 != 0 (gift popups with catalog lookups).
+// See docs/research/02-post-auth-chain.md §15/§19 and docs/protocol/tcp-messages.md.
 
 #include "services.hpp"
 

@@ -30,6 +30,8 @@ constexpr long long kCurrencyCap = 2000000000LL;
 // In-game CREDITS (soft, green) is the inventory item "diamond_dust"; in-game GOLD
 // (hard) is the item "credits" (gift handler 0x5e7340: soft_currency -> diamond_dust,
 // hard_currency -> credits).
+const char* kClassNames[] = {"assault", "heavy", "recon", "sniper", "support", "mercenary",
+                             "sapper", "morph", "paladin", "enforcer", "tracker"};
 const char* kSoft = "diamond_dust";
 const char* kHard = "credits";
 
@@ -757,8 +759,16 @@ RedeemOutcome Progress::grant_locked(const std::string& code, const std::vector<
     std::vector<std::string> missing;
     for (const std::string& grp : groups) {
         auto it = universe_.groups.find(grp);
-        if (it == universe_.groups.end() || it->second.empty()) { missing.push_back(grp); continue; }
-        for (const std::string& n : it->second) want(n, 1);
+        if (it != universe_.groups.end() && !it->second.empty()) {
+            for (const std::string& n : it->second) want(n, 1);
+        } else if (grp == "classes") {
+            // A soldier class is owned when skills.bin marks it free (unlockLevel 1) or
+            // the inventory holds an item named exactly after it (0x5d47b0 -> 0x5e5c90);
+            // the 11 names are the client's own identifiers (0x843160).
+            for (const char* n : kClassNames) want(n, 1);
+        } else {
+            missing.push_back(grp);
+        }
     }
     if (custom_items.is_object())
         for (const auto& kv : custom_items.items())

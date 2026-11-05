@@ -44,6 +44,7 @@ http or https, the one listener serves both.
 | 2 | scheme rewrite (pandora) | `0xc85db0` | `ff 03 02 d1 f5 2b 00 f9 f4 4f 06 a9 fd 7b 07 a9` (prologue) | first instruction → `ret` (`c0 03 5f d6`) | The client upgrades the located pandora URL http→https; neutralised so our http URL is used as-is |
 | 3 | scheme rewrite (federation) | `0xc86020` | same prologue | first instruction → `ret` | Same, for the `federation` URL |
 | 4 | asio TLS verify callback | `0x1252c70` (sym `_ZN4asio3ssl6detail6engine24verify_callback_functionEiP17x509_store_ctx_st`) | `f5 0f 1d f8 f4 4f 01 a9` (prologue) | → `mov w0,#1 ; ret` (`20 00 80 52 c0 03 5f d6`) | Accept our self-signed loopback cert; the client otherwise rejects it with a fatal `unknown_ca` alert |
+| 5 | level-up rewards accessor | `0x628af8` (68 B, the whole function) | `3f000071 cd010054 080043f9 … 00fc42f9 c0035fd6` | first two words → `ldr x9,[x0,#0x5f8] ; cbz x9,0x628b34`; word 15 → `add x0,x0,#0x5f8` | An unsized level-up table returns an empty range instead of NULL: the Profile → stats crash at `0x95e6ec` |
 
 Patches 2 and 3 are single-caller leaf helpers (called only from the scheme-upgrade
 parent at `0xc85c40`); returning immediately leaves the URL string unchanged and does
@@ -57,6 +58,18 @@ is the callback OpenSSL invokes per certificate; it is exported (WEAK), so it is
 by symbol at runtime (vaddr `0x1252c70` is only a fallback) and its prologue replaced with
 `return 1`, so every server cert is accepted. This is the allowed "patch only TLS, and say
 why" case — it changes only certificate trust on loopback, nothing else.
+
+Patch 5 (`apply_levelup_rewards_guard`, applied with the diagnostics once libMC5 is loaded) is
+the backstop for the Profile → stats crash (research/04-progression.md §1.1). The accessor
+`0x628af8(cfg, level)` returns `&cfg->rewards[level]`, a vector of vectors at `cfg+0x5f8` that
+only the config parser sizes (`0x614c78`, from `game["_level_up_rewards"]`). While the server
+sent the empty config `{}`, the table was never allocated, the accessor returned `begin = NULL`,
+and its three callers (`0x95cb20` stats page, `0x941738` / `0xa3e820` level-up popups) crashed on
+`ldp x8,x9,[x0]`. The primary fix is server-side (TCP_Config now carries `"game"`). The patch
+makes an empty table return `&cfg->table` itself (`{NULL,NULL}`), so the callers' own
+`begin == end` check skips the loop. A non-empty table behaves exactly as before. The whole
+68-byte function is fingerprint-checked before writing. The disassembly of the patched bytes
+was verified with capstone.
 
 ## Not patched
 
