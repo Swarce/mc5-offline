@@ -518,7 +518,9 @@ Logging:
 - **0x12** (`0x79af60` → apply `0x79a0e8`) reads `error`, `xp`, `sp`, `cup`/`solo`.
   - Any non-null `error` shows popupProgressNotSaved.
   - `xp` and `sp` are added by the client itself. Level-ups come from the local rewards.bin "XP" table and never touch `cfg+0x5f8`.
-  - On success, the pending achievements unlock locally: 0x19 is sent and their SP is added on the client. The server does not yet know those SP amounts (§7 risk 7).
+  - On success, the mission's pending achievements unlock **locally only**. In TS-online mode `0x78f7b8` (w3 = 1, `app+0x6f4` set) skips the 0x19 builder (`cbnz` at `0x78f804`) and adds the rewards.bin SP for some ids (`(id & ~0xf) == 0x20` or `0x79b0b8`). Achievement SP must therefore come from the 0x11 achievement records plus the rewards table; until that table is dumped, the save under-counts skill points by those amounts (§7 risk 7).
+  - A duplicate 0x12 double-applies xp/sp on the client (achievements are not re-unlocked). The client re-sends 0x11 only when its 0x12 was never processed, so the server keeps answering in full.
+  - Never send negative xp: a total of exactly 0 erases the item.
 - **0x07 u32 0** (`0x831cb8`, `strh 0x0001 → ts+0x70`) is the same path as the loader's 15 s timeout (`0x82fb04`). The level then loads from the local packs (`LoadRawLvl 0x5c33b0`).
 - **0x54 `null`** gives INVALID (`0x9622f0`) with no catalog access. With no 0x54 there is no spinner: the SWF hid the popup before sending.
 

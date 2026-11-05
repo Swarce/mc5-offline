@@ -45,7 +45,10 @@ Not kept yet (the client sends them, and the server records them in `state.json`
 
 * **Bought skills.** The skill frame (0x17) carries no cost, and the profile needs the skill names.
   * After a restart your skills reset and their skill points come back, so nothing is lost.
-* **Achievements.** The profile format needs achievement names, which come from the planned in-game dump.
+* **Achievements, and the skill points they award.** The profile format needs achievement names, and the
+  reward amounts come from a table that is not dumped yet. The game unlocks a mission's achievements and credits
+  their skill points locally, but does not report the amount. After a restart, those skill points are missing from
+  the save.
 
 **First launch on this build:** the server has no save yet, so the game runs its first-run flow once more (age gate,
 tutorial). Every launch after that loads your save.
