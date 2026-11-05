@@ -482,3 +482,76 @@ Logging:
 | 29 | BALD hook-off permanent | yes | undone by resume G:0xc62348→G:0x136ded0 | **not permanent; serve the 3 assets instead** | decomp |
 | 30 | bald dir1 == dir2 | inferred | identical code | **same folder** | G:0xc92628 ≡ G:0xc63e38 |
 | 31 | Existing `default_profile()` | "structural keys" | crashes (`private_profile:{}`), wrong keys | **remove** | asBool 0x1153c28 |
+
+---
+
+## 9 What is implemented (M2, commits 712f76b..)
+
+| Area | Implementation | Differences from the spec above |
+|---|---|---|
+| TCP_Config | `config_json()` = `{"game":{"_level_up_rewards":[{}]}}` in the login burst (`settings config.sendGame`) | none |
+| Guard patch | `apply_levelup_rewards_guard()` (patches.md #5) | none |
+| Save | `Progress` (`server/services/profile.*`), `<files>/MC5Offline/{settings,profile,state}.json`, atomic + `.bak` + `.broken-*` | loadouts are kept in `state.json` and merged at render |
+| Login profile | 0x03 ≤ 65,528 B, else 0x27 with our own LZ4 (hash-chain matcher; ~12× on item JSON) | adds a **crash guard**: armed on send, confirmed by 0x10/0x24 or 20 s alive; two unconfirmed launches disable it |
+| Frames | 0x59, 0x0b, 0x10/0x2d, 0x11→0x12, 0xac, 0x24, 0x16 (op0-after-0x22 ignored), 0x17, 0x19, 0x1a, 0x32, 0xa3, 0x06→0x07, 0x21/0x96→0x22 | purchases (0x41…) are logged, not answered (`economy.purchases:"none"`); `missionCredits` not implemented |
+| 0x12 | `{"xp":X,"sp":Y}`, sent on every 0x11, applied to the save once per distinct payload | X = xp.rewards + xp.medals + xp.objectives, Y = sp.value (flat dotted keys or nested); to be confirmed by the device 0x11 dump |
+| BALD | index `1`, toc_1, `<dlc/>` map (`settings bald.serve`) | adds the "bald" crash guard (60 s) |
+| Codes | 0x53 → 0x45/0x46 grants (≤ 400 keys, currencies in their own frame) + 0x54 only for catalog items; `null` for invalid | adds `UNLOCKKILLSIGS`; a code whose item list is missing is reported invalid and **not consumed** |
+| Item lists | `hosts/embedded/item_dump.*` on the 0x53 / 0x16 builder hooks (game thread) | §10 |
+
+### 9.1 Findings of the second verification round (wf `mc5-unlock-preconditions`)
+
+- **Push safety (confirmed twice).** With F1 = 0, 0x5f58e8 takes the explicit branch `0x5f5bc8 cbz w26`. That branch zeroes every popup flag, so the level-up popups, `0x5e8f98` and the unchecked catalog sites cannot run. The only catalog lookups left are NULL-checked. With an empty catalog, a push is a plain SetCount per key and raises no "new" badges.
+- **Same-frame duplicates.** SetCount (`0x5cf5d0`, w3 = 0) appends new nodes unsorted but binary-searches the whole vector until the frame's final sort. An existing key processed after an append can therefore be inserted twice. Currencies always exist on the client, so they get their own frame.
+- **Ownership (confirmed).** Ownership is a count > 0 of FNV(name) (`0x5d5e40`). It does not depend on the catalog:
+  - class = item named after the skills.bin class (`0x5e5c90`; free when unlockLevel == 1);
+  - weapon = base name (`0x5d0d30`; free when attribute 0xf508ab3c is missing or > 0.1);
+  - attachment = `<base>#<att>` (`0x5d6a18`);
+  - camo = `0x5d5d70`;
+  - trinket = `0x5d62c0`;
+  - mask = `0x5d7300`;
+  - body piece = `0x5d7530`;
+  - bodyset = all pieces owned (`0x5d7580`);
+  - killsig = `0x5db888`.
+- **Weapon count must be exactly 1** (or 1 + PRO-list length). The resolver `0x5d5370` reverts to the base weapon for anything larger. The server grants 1.
+- **Never push xp** through 0x45/0x46: XP arrives through 0x12, and the login profile carries it.
+- **0x12** (`0x79af60` → apply `0x79a0e8`) reads `error`, `xp`, `sp`, `cup`/`solo`.
+  - Any non-null `error` shows popupProgressNotSaved.
+  - `xp` and `sp` are added by the client itself. Level-ups come from the local rewards.bin "XP" table and never touch `cfg+0x5f8`.
+  - On success, the pending achievements unlock locally: 0x19 is sent and their SP is added on the client. The server does not yet know those SP amounts (§7 risk 7).
+- **0x07 u32 0** (`0x831cb8`, `strh 0x0001 → ts+0x70`) is the same path as the loader's 15 s timeout (`0x82fb04`). The level then loads from the local packs (`LoadRawLvl 0x5c33b0`).
+- **0x54 `null`** gives INVALID (`0x9622f0`) with no catalog access. With no 0x54 there is no spinner: the SWF hid the popup before sending.
+
+## 10 In-memory item lists (no shipped data)
+
+All addresses are ELF vaddrs (libMC5 6.0.12a). Each list is self-checked: the hash stored next to every name must equal FNV-1a(name), or the whole list is dropped.
+
+**Armory.** A = `*(base+0x1bbed40)` (getter `0x4e5f98`). It is allocated and parsed synchronously at boot (`0x4e5c10`), before StartLogin.
+
+| List | Layout (offsets from A) | Granted |
+|---|---|---|
+| weapons | names vector `+0x190` (base first, then PRO variants), count of base `+0xc8`, hashes `+0xd0`, records `+0xe8` / 0x118 | base weapons |
+| attachments | records `+0x118` / 0x78, names `+0x1a8`, hashes `+0x100`; WM rows `+0x160` / 0x18 of {u32 att, i32 v1, i32 v2} | `<w>#<a>` for the first triple per att with v1 > 0 (the game's catalog rule, `0x60f640`/`0x7eaa68`) |
+| camos | records `+0x288` / 0x70 (hash +0, free flag +0x4c bit 0), names `+0x2a0` | non-free |
+| masks | records `+0x258` / 0x90, names `+0x270` | all |
+| trinkets | records `+0x2f8` / 0x40 (free when +0x2c != 0), names `+0x310` | non-free |
+| body pieces / body camos | `+0x18` / 0x90 and `+0x0` / 0x98; name string at +0x10, hash +8; default +0x39, hidden +0x40 | non-default, non-hidden |
+
+**Killsigs.** Manager M = `*(base+0x1bbed00)`:
+- count `M+0x1a8`, array `M+0x1b0`, stride 0x50;
+- each entry: name +0, item hash +0x18, condition +0x20;
+- granted when the condition is not "none".
+
+**Classes.** Skills manager S = `*(base+0x1bbed08)`:
+- SKILL_TREE vector at `S+0x10`, stride 0x78;
+- each entry: hash +0, name +8, unlockLevel +0x28;
+- granted when unlockLevel != 1.
+
+The 11 literals at `0x843160` are the fallback; they map hashes to UI strings, so the spelling is only medium-confidence.
+
+**Not granted:**
+- PRO variants;
+- cores (`<core>_l<n>` levels);
+- grenades (gated by level, not by the inventory);
+- `<set>_bodyset` (the pieces are granted instead);
+- event boosters.

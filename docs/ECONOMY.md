@@ -73,12 +73,13 @@ over the internet.
 
 | Code | Grants |
 |---|---|
-| `UNLOCKALL` | every class, weapon, attachment, camo and gear item |
+| `UNLOCKALL` | every class, weapon, attachment, camo, gear item and kill signature |
 | `UNLOCKCLASSES` | all 11 soldier classes (assault, heavy, recon, sniper, support, mercenary, sapper, morph, paladin, enforcer, tracker) |
 | `UNLOCKWEAPONS` | the classes, then every weapon |
 | `UNLOCKATTACHMENTS` | the weapons, then every weapon attachment |
 | `UNLOCKCAMOS` | every camo |
 | `UNLOCKGEAR` | body pieces, body camos, masks, trinkets |
+| `UNLOCKKILLSIGS` | every kill signature that has an unlock condition |
 | `UNLOCKCURRENCY` | +1,000,000 Credits and +100,000 Gold (both capped at 2,000,000,000) |
 | your own | see `redeem.codes` below |
 
@@ -99,10 +100,15 @@ How the codes behave:
 
 ### 3.2 Where the item names come from
 
-Nothing from the game is shipped. Classes are the game's own 11 identifiers. All other item names (weapons,
-attachments, camos, gear) are read **from your own game data** at runtime. The first time you open the redeem screen
-and submit a code, the injected library reads the in-memory armory on the game thread and hands the name lists to the
-server.
+Nothing from the game is shipped. All item names are read **from your own game data** at runtime: the in-memory
+armory (built from your `armory.bin`), the skill tree (classes) and the kill-signature table.
+
+* **When:** on the game thread, the first time the game sends a loadout (right after every login) or a redeem code.
+* **Checks:** the game stores each item's hash next to its name, and every list is checked against those hashes. A
+  list that does not check out is left out; it is never guessed. If the class list is missing, the game's 11 class
+  identifiers are used instead.
+* **What is granted:** free/default items are skipped, since you already own them. Weapons get count 1 (the base
+  weapon; a higher count would mean a PRO level). Attachments are only the pairs your weapons actually accept.
 
 The name lists are also written to `MC5Offline/dumps/`, so you can inspect them.
 

@@ -2,6 +2,28 @@
 
 Device-test history and the current state. Newest first.
 
+## November 2026: M2, progression and unlock codes (host-verified; next device round pending)
+
+* Device round d86ee5c: the age gate passes, the tutorial and the second mission play, and the menu is reached.
+  Three problems remained:
+  * opening Profile → stats crashed (SIGSEGV at `0x95e6ec`);
+  * both currencies showed `-1`;
+  * there was a DLC-index 404 storm, and nothing persisted between launches.
+* Fixed in M2 ([research/02 §19](research/02-post-auth-chain.md), [research/04](research/04-progression.md),
+  [ECONOMY.md](ECONOMY.md)):
+  * **Stats crash.** TCP_Config now carries `"game"`, and patch #5 guards the level-up accessor.
+  * **Save.** The save is kept in `<files>/MC5Offline` and returned as TCP_Profile at login.
+  * **Mission replies.** Mission end gets `0x12` (the stats screen waits for it) and level data gets `0x07` (no 15 s
+    wait).
+  * **BALD.** The DLC manager is answered with an empty DLC map.
+  * **Unlock codes.** MCVS-style codes on MC5's own Redeem button: UNLOCKALL, UNLOCKCLASSES, UNLOCKWEAPONS,
+    UNLOCKATTACHMENTS, UNLOCKCAMOS, UNLOCKGEAR, UNLOCKKILLSIGS, UNLOCKCURRENCY and custom codes. The item lists are
+    read from the player's own in-memory game data.
+* **Crash guards.** Two pieces have never run on a device: the login profile apply and BALD becoming ready. Each
+  switches itself off after two launches that die right after it.
+* **Tests.** 7 host suites pass: codec, LZ4, the save and load cycle, the guards, the codes, BALD, the item-dump
+  reader over a synthetic armory, and the meta-channel replies.
+
 ## November 2026: transport solved on device → into M1 (serving the Federation chain)
 
 * **The TLS-verify bypass worked:** with patch #4 applied, the game's HTTPS requests reach our
