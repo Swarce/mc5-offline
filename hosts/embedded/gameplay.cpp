@@ -221,6 +221,7 @@ void watch_local_match() {
     if (top != g_pushed_st) {
         logi("[botmatch] local match state left the stack after %d frames (match started or closed)", g_pushed_frames);
         g_pushed_st = nullptr;
+        g_hs.use = false;
         return;
     }
     if (++g_pushed_frames < 300) return;
@@ -241,6 +242,7 @@ void watch_local_match() {
     reinterpret_cast<void (*)(void*)>(g_base + 0x82c218)(stk);
     if (mp) reinterpret_cast<void (*)(void*, int)>(g_base + 0x836ee0)(mp, 0);
     g_pushed_st = nullptr;
+    g_hs.use = false;
     g_bots_armed.store(0);
     g_bot_target.store(0);
     g_local_active.store(false);
@@ -261,7 +263,7 @@ void repair_host_entry(const char* where) {
     int candidate = -1;
     for (int k = 0; k < 128; ++k) {
         uintptr_t e = m + 0x1d0 + 0x28ull * k;
-        std::uint16_t used = 0;
+        unsigned char used = 0; // +0 in-use byte (+1 is a separate flag)
         std::int16_t id = 0;
         unsigned char slot = 0, st = 0;
         if (!rdv(e, used) || !rdv(e + 0x18, id)) return;
@@ -288,8 +290,7 @@ extern "C" void mc5_mission_start_hook(const char*, unsigned long long, unsigned
 // [0x10] = R[m]+0x2c -- exactly what the Quick Play builder 0xbf1da0 writes.
 extern "C" void mc5_settings_hook(const char*, unsigned long long x0, unsigned long long x1, unsigned long long,
                                   unsigned long long lr) {
-    if (!g_hs.use || lr != g_base + 0x8377b0) return;
-    g_hs.use = false;
+    if (!g_hs.use || lr != g_base + 0x8377b0) return; // cleared when our state leaves the stack
     uintptr_t mp = static_cast<uintptr_t>(x0), b338 = 0, recs = 0;
     if (mp < 0x1000 || !rdv(mp + 0xb338, b338) || !rdv(b338 + 0x110, recs) || recs < 0x1000) return;
     std::int32_t* st = reinterpret_cast<std::int32_t*>(x1);
@@ -304,8 +305,19 @@ extern "C" void mc5_settings_hook(const char*, unsigned long long x0, unsigned l
             st[4] = f2c;
         }
     }
-    if (g_hs.map >= 0 && g_hs.map < 64) st[1] = g_hs.map;
-    if (g_hs.cap >= 2 && g_hs.cap <= 13) st[2] = g_hs.cap;
+    // Map: Quick Play stores the map COUNT in QPM+0x52c0 as "server picks" (0xbf0ec0), so
+    // only a hint that is a real index (0 <= hint < count, count from MapDB
+    // *(*(base+0x1b9aee0)) vector +0x20/+0x28 stride 0x98, as 0x8dc850/0x8dc8b8) replaces
+    // the local host's own choice (MapDB+0x3c, else rand()%4).
+    {
+        uintptr_t got = 0, db = 0, b = 0, e = 0;
+        long count = -1;
+        if (rdv(g_base + 0x1b9aee0, got) && rdv(got, db) && rdv(db + 0x20, b) && rdv(db + 0x28, e) && e >= b &&
+            (e - b) % 0x98 == 0)
+            count = static_cast<long>((e - b) / 0x98);
+        if (g_hs.map >= 0 && g_hs.map < count) st[1] = g_hs.map;
+    }
+    if (g_hs.cap >= 2 && g_hs.cap <= 12) st[2] = g_hs.cap;
     logi("[quickplay] local host settings: mode %d->%d map %d->%d players %d->%d time %d->%d ms (QP mode id %d)",
          before[0], st[0], before[1], st[1], before[2], st[2], before[3], st[3], g_hs.mode);
 }
@@ -332,14 +344,20 @@ extern "C" void mc5_qp_update_hook(const char*, unsigned long long x0, unsigned 
         rdv(qpm + 0x52c8, cap);
         rdv(qpm + 0x52c0, map);
         if (mode < 0 || mode >= 12 || mode == 8) {
-            logw("[quickplay] mode id %d is not hosted offline (Battle Royale / unknown); leaving the native flow", mode);
+            static std::int32_t warned_for = -1;
+            std::int32_t t0 = 0;
+            rdv(qpm + 0x5170, t0);
+            if (warned_for != t0) {
+                warned_for = t0;
+                logw("[quickplay] mode id %d is not hosted offline (Battle Royale / unknown); leaving the native flow", mode);
+            }
             return;
         }
         g_qp.active = true;
         g_qp.fire = false;
         g_qp.qpm = qpm;
         g_qp.mode = mode;
-        g_qp.cap = cap < 2 ? 2 : (cap > 13 ? 13 : cap);
+        g_qp.cap = cap < 2 ? 2 : (cap > 12 ? 12 : cap);
         g_qp.map = map;
         int lo = g_qp_search_min.load(), hi = g_qp_search_max.load();
         if (hi < lo) hi = lo;
@@ -365,11 +383,23 @@ extern "C" void mc5_pump_hook(const char*, unsigned long long, unsigned long lon
                               unsigned long long) {
     try {
     watch_local_match();
+    if (g_local_active.load() && !g_pushed_st) {
+        void* mp = reinterpret_cast<void* (*)()>(g_base + 0x4e2108)();
+        unsigned char c4 = 0;
+        if (mp && rdv(reinterpret_cast<uintptr_t>(mp) + 0xc4, c4) && c4 == 0) {
+            logi("[botmatch] local match over (MP+0xc4 cleared)");
+            g_local_active.store(false);
+            g_bot_target.store(0);
+        }
+    }
     if (g_local_active.load()) repair_host_entry("frame");
     if (g_qp.active && g_qp.fire) {
         g_qp.active = false;
         g_qp.fire = false;
-        if (g_pushed_st) {
+        std::int32_t flow = 0, state = 0;
+        if (!rdv(g_qp.qpm + 0x516c, flow) || !rdv(g_base + kQpState, state) || flow != 1 || state != 1) {
+            logi("[quickplay] search was cancelled; not hosting");
+        } else if (g_pushed_st) {
             logw("[quickplay] a local match is already starting");
         } else {
             g_hs = HostSettings{true, g_qp.mode, g_qp.cap, g_qp.map};
