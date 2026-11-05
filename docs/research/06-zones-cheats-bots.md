@@ -37,6 +37,25 @@ zone-table offsets (`0x8e2810`, `0x8e2d60`, `0x64f5f8`, `0x5c2d30`, `0x4f85b0`),
   * Whether type-0 bots move or shoot is unverified (spec §C3).
 * **Quick Play** (`automatch/quickplay*`) answers `[]`. Offline there are no dedicated game servers, and a joined
   client is never the authority.
+* **Review hardening** (wf `mc5-m4-review`, each finding adversarially verified):
+  * **Walk timing.** The zone walk also runs at the first 0x34 after login. A deferred push about 3.5 s after each
+    walk opens a zone the player already earned right away, instead of only after the next mission.
+  * **Special zone indices.** Entries for the indices Z..n−1 are skipped instead of rejecting the whole table.
+  * **No saves on the game thread.** The game thread never saves: `set_zone_table` only marks the save dirty, and the
+    keepalive thread flushes it.
+  * **Local-match recovery.**
+    * **The failure:** if host init fails, the game retries every frame with a frozen screen.
+    * **The exit:** after about 300 frames with our state still on top, the hook leaves exactly the way the game's own
+      PopState command does (`0x8376dc..0x837718`: destroy the strings with `0x4226d0`, empty the vector, call
+      `MP->vt[0x10]`, pop with `0x82c218`, then clear `MP+0xc4`).
+    * **One at a time:** a second BOTMATCH is refused while one is still starting.
+  * **Bot arming.** It is consumed by one bot manager. At most 11 bots.
+  * **Exception guard.** The pump hook catches exceptions, since the trampoline has no unwind info.
+  * **Cheat re-assert.** Cheat bytes are re-asserted at mission start whenever the player made an explicit choice,
+    so CHEATSOFF sticks against settings_new.dat.
+  * **Command codes.** They respect `redeem.enabled`, and an empty `bots.code` is ignored.
+  * **Known, harmless:** `_inventory_shadow.unlocked_zones` is ignored by the client loader, which only reads `upd_`
+    keys. The home page then sends one 0x48 per session, which we log.
 * **Not done:** a real debug menu (Tier 2, which needs the AS3 value ABI). `has_debug_info_menu` is **not** sent,
   because it only shows an empty INFO page.
 

@@ -44,6 +44,8 @@ std::mutex g_walk_mu;
 std::atomic<int> g_botmatch_pending{0}; // bot count requested (0 = none)
 std::atomic<int> g_bots_armed{0};       // bots to set on the next bot manager seen
 std::atomic<uintptr_t> g_last_bm{0};
+void* g_pushed_st = nullptr;  // our MultiplayerStartLocalGame state (game thread only)
+int g_pushed_frames = 0;
 
 bool rd(uintptr_t a, void* out, std::size_t n) {
     if (a < 0x1000) return false;
@@ -111,7 +113,10 @@ bool walk_zones(std::map<int, std::vector<std::uint32_t>>& story, int& Z, std::s
         uintptr_t blk = 0, arr = 0;
         if (!rdv(e, zone) || !rdv(e + 4, type) || !rdv(e + 8, blk)) { why = "entry unreadable"; return false; }
         if (type != 0) continue;
-        if (zone < 0 || zone >= Z) { why = "entry zone " + std::to_string(zone) + " out of range"; return false; }
+        // The builder (G:0x9e1858) also makes entries for the special indices Z..n-1;
+        // they are never consulted (cap Z-2), so skip them instead of rejecting.
+        if (zone < 0 || zone >= n) { why = "entry zone " + std::to_string(zone) + " out of range"; return false; }
+        if (zone >= Z) continue;
         if (!rdv(blk + 0x80, cnt) || cnt <= 0 || cnt > 64 || !rdv(blk + 0x88, arr)) { why = "block unreadable"; return false; }
         for (std::int32_t i = 0; i < cnt; ++i) {
             uintptr_t node = 0;
@@ -177,13 +182,54 @@ void start_bot_match_now(int bots) {
     }
     g_bots_armed.store(bots);
     g_last_bm.store(0);
+    g_pushed_st = st;
+    g_pushed_frames = 0;
     logi("[botmatch] local match state pushed (MP=0x%llx, top=%p); %d bots will be requested when the match's "
          "bot manager appears", static_cast<unsigned long long>(m), top, bots);
+}
+
+// If host init fails (0xb365e8 false at 0x83785c), 0x837588 keeps its command vector and
+// retries every frame: a frozen screen. After ~5 s with our state still on top and the
+// command still pending, leave exactly the way the game's own "PopState" command does
+// (0x8376dc..0x837718): destroy the strings (0x4226d0), empty the vector, MP->vt[0x10],
+// pop the state stack (0x82c218, which deletes the state), then clear MP+0xc4.
+void watch_local_match() {
+    if (!g_pushed_st) return;
+    void* g = reinterpret_cast<void* (*)()>(g_base + 0x4e04a8)();
+    if (!g) { g_pushed_st = nullptr; return; }
+    void* stk = static_cast<char*>(g) + 0x398;
+    void* top = reinterpret_cast<void* (*)(void*)>(g_base + 0x834528)(stk);
+    if (top != g_pushed_st) {
+        logi("[botmatch] local match state left the stack after %d frames (match started or closed)", g_pushed_frames);
+        g_pushed_st = nullptr;
+        return;
+    }
+    if (++g_pushed_frames < 300) return;
+    uintptr_t st = reinterpret_cast<uintptr_t>(g_pushed_st), vb = 0, ve = 0;
+    if (!rdv(st + 0x28, vb) || !rdv(st + 0x30, ve) || ve <= vb || (ve - vb) % 0x18 != 0) {
+        g_pushed_st = nullptr;
+        return;
+    }
+    logw("[botmatch] local match host init did not succeed after %d frames (UDP 7891 setup failed?); leaving the "
+         "state the way the game's PopState does", g_pushed_frames);
+    for (uintptr_t e = ve; e > vb;) { e -= 0x18; reinterpret_cast<void (*)(void*)>(g_base + 0x4226d0)(reinterpret_cast<void*>(e)); }
+    *reinterpret_cast<uintptr_t*>(st + 0x30) = vb;
+    void* mp = reinterpret_cast<void* (*)()>(g_base + 0x4e2108)();
+    if (mp) {
+        void** vt = *reinterpret_cast<void***>(mp);
+        reinterpret_cast<void (*)(void*)>(vt[0x10 / 8])(mp);
+    }
+    reinterpret_cast<void (*)(void*)>(g_base + 0x82c218)(stk);
+    if (mp) reinterpret_cast<void (*)(void*, int)>(g_base + 0x836ee0)(mp, 0);
+    g_pushed_st = nullptr;
+    g_bots_armed.store(0);
 }
 
 // --- hooks --------------------------------------------------------------------
 extern "C" void mc5_pump_hook(const char*, unsigned long long, unsigned long long, unsigned long long,
                               unsigned long long) {
+    try {
+    watch_local_match();
     if (g_cheats_pending.exchange(false)) apply_cheats_now();
     if (g_walk_pending.load()) {
         bool due;
@@ -192,8 +238,12 @@ extern "C" void mc5_pump_hook(const char*, unsigned long long, unsigned long lon
     }
     int bots = g_botmatch_pending.exchange(0);
     if (bots > 0) {
-        if (g_seq_ok) start_bot_match_now(bots);
+        if (g_pushed_st) logw("[botmatch] NOT started: a local match is already starting");
+        else if (g_seq_ok) start_bot_match_now(bots);
         else logw("[botmatch] NOT started: the game's local-match sequence did not match this build");
+    }
+    } catch (...) {
+        logw("[gameplay] exception in the pump hook (ignored)");
     }
 }
 
@@ -215,6 +265,7 @@ extern "C" void mc5_bot_tick_hook(const char*, unsigned long long x0, unsigned l
     *reinterpret_cast<volatile std::int32_t*>(bm + 0x58) = n;
     *reinterpret_cast<volatile unsigned char*>(bm + 3) = 1;
     g_last_bm.store(bm);
+    g_bots_armed.store(0); // one bot manager per BOTMATCH
     logi("[bots] bot manager 0x%llx (data 0x%llx): bots %d -> %d, fill armed (bm+3 %d -> 1)",
          static_cast<unsigned long long>(bm), static_cast<unsigned long long>(data), c58, n, b3);
 }
@@ -254,7 +305,7 @@ void queue_zone_walk() {
 std::string queue_bot_match(int bots) {
     if (!g_seq_ok) return "the game's local-match code did not match this build";
     if (bots < 1) bots = 1;
-    if (bots > 12) bots = 12;
+    if (bots > 11) bots = 11; // 12 players with the host
     g_botmatch_pending.store(bots);
     return std::string();
 }

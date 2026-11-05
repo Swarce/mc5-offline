@@ -469,6 +469,23 @@ void push_grants(MetaConn& m, const RedeemOutcome& o, bool reply = false) {
     if (!early) send54();
 }
 
+// Ask the game thread for its zone table (read ~2 s later), then push whatever the walk
+// unlocked ~3.5 s from now, so a zone the player already earned opens right away.
+void schedule_zone_walk(MetaConn& m) {
+    if (!m.ctx().host.request_zone_walk) return;
+    m.ctx().host.request_zone_walk();
+    MetaConn* mp = &m;
+    m.spawn([mp] {
+        if (!mp->wait_ms(3500)) return;
+        std::string f = mp->ctx().progress.take_zone_push(false);
+        if (!f.empty()) {
+            logi("meta#%d zones: unlocked_zones=%lld -> 0x45 (silent, after the zone table)", mp->id(),
+                 mp->ctx().progress.unlocked_zones());
+            mp->send_frames(f, "0x45 unlocked_zones");
+        }
+    });
+}
+
 // Every client frame after the login burst.
 void handle_frame(MetaConn& m, std::uint8_t type, const std::string& p) {
     Progress& pr = m.ctx().progress;
@@ -493,7 +510,9 @@ void handle_frame(MetaConn& m, std::uint8_t type, const std::string& p) {
             // reloads its settings file, settings_new.dat).
             auto& h = m.ctx().host;
             Progress::Cheats c = pr.cheats();
-            if (h.apply_cheats && (c.god || c.ammo || c.medkits)) h.apply_cheats(c.god, c.ammo, c.medkits);
+            // Also when all are off but the player chose so (CHEATSOFF): the game reloads
+            // its own settings file, which may still hold an older choice.
+            if (h.apply_cheats && (c.god || c.ammo || c.medkits || c.explicit_choice)) h.apply_cheats(c.god, c.ammo, c.medkits);
             break;
         }
         case 0x06: {
@@ -518,12 +537,13 @@ void handle_frame(MetaConn& m, std::uint8_t type, const std::string& p) {
             pr.on_menu_return();
             // Campaign zones: the game's zone table is read on the game thread; the count
             // "unlocked_zones" is pushed silently when it grew (or once per connection).
-            if (m.ctx().host.request_zone_walk) m.ctx().host.request_zone_walk();
-            std::string zf = pr.take_zone_push(m.first_menu_return());
+            bool first = m.first_menu_return();
+            std::string zf = pr.take_zone_push(first);
             if (!zf.empty()) {
                 logi("meta#%d zones: unlocked_zones=%lld -> 0x45 (silent)", m.id(), pr.unlocked_zones());
                 m.send_frames(zf, "0x45 unlocked_zones");
             }
+            schedule_zone_walk(m);
             break;
         }
         case 0x16: pr.on_loadout(p); break;
@@ -621,6 +641,7 @@ void serve_meta_conn(ServerContext& ctx, Conn& c, const std::string& peer) {
     // (B) TS binary: nothing is written until the client's first frame.
     bool burst_sent = false;
     bool unlock_all_armed = false;
+    bool zone_walk_on_login = false;
     for (;;) {
         // An unexpected JSON line after "connect game" (the client re-using the
         // controller protocol) — answer it and keep going.
@@ -680,6 +701,9 @@ void serve_meta_conn(ServerContext& ctx, Conn& c, const std::string& peer) {
         log_milestone(m, type, payload);
         ctx.progress.after_login_frame(type);
         handle_frame(m, type, payload);
+
+        // The menu is up after login (first 0x34): read the zone table once.
+        if (type == 0x34 && !zone_walk_on_login) { zone_walk_on_login = true; schedule_zone_walk(m); }
 
         // settings.unlockAll: once the menu is up (first 0x24/0x34), after a delay.
         if (!unlock_all_armed && (type == 0x24 || type == 0x34) && ctx.progress.unlock_all_pending()) {

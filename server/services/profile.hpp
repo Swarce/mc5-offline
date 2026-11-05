@@ -128,7 +128,7 @@ public:
     // "tranzaction_in_progress" lock, pm+0x170, via F1=0 at 0x5f5ac8).
     std::string on_purchase(std::uint8_t type, const std::string& payload, std::string& log);
     // Gameplay cheat toggles (written into the game's settings bytes by the host).
-    struct Cheats { bool god = false, ammo = false, medkits = false; };
+    struct Cheats { bool god = false, ammo = false, medkits = false; bool explicit_choice = false; };
     Cheats cheats() const;
     // Redeem codes that are commands rather than grants (repeatable): GODMODE,
     // INFINITEAMMO, INFINITEMEDKITS, CHEATSOFF, BOTMATCH, UNLOCKZONES. Returns true if
@@ -187,6 +187,7 @@ private:
     std::string last_mission_key_;
     bool zones_push_pending_ = false;
     bool zones_pushed_this_session_ = false;
+    bool defer_save_ = false; // set while called from the game thread (no fsync there)
     ItemUniverse universe_;
     std::set<std::string> user_groups_; // groups from <dir>/items.json (they win over the dump)
 };

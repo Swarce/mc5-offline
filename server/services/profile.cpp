@@ -398,6 +398,7 @@ void Progress::save_locked(bool force) {
 
 void Progress::touch_locked(bool now) {
     dirty_ = true;
+    if (defer_save_) return;
     if (now || std::chrono::steady_clock::now() - last_save_ >= std::chrono::seconds(1)) save_locked(true);
 }
 
@@ -1011,8 +1012,12 @@ void Progress::set_zone_table(const std::map<int, std::vector<std::uint32_t>>& s
     state_["zones"] = z;
     if (changed) logi("[zones] zone table from %s: Z=%d cap=%lld story missions per zone {%s}", source.c_str(), Z,
                       zone_cap_locked(), summary.c_str());
+    // Called on the GAME thread: never save here (fsync on the frame thread); the
+    // keepalive thread's flush() writes it within 5 s.
+    defer_save_ = true;
     recompute_zones_locked("zone table");
-    touch_locked(changed);
+    defer_save_ = false;
+    if (changed) dirty_ = true;
 }
 
 std::string Progress::take_zone_push(bool first_menu_return) {
@@ -1069,6 +1074,7 @@ std::string Progress::on_purchase(std::uint8_t type, const std::string& p, std::
 Progress::Cheats Progress::cheats() const {
     std::lock_guard<std::mutex> g(mu_);
     Cheats c;
+    c.explicit_choice = state_["cheats"].size() > 0;
     const Json& st = state_["cheats"];
     c.god = st["godMode"].is_bool() ? st["godMode"].as_bool() : setting_bool("cheats", "godMode", false);
     c.ammo = st["infiniteAmmo"].is_bool() ? st["infiniteAmmo"].as_bool() : setting_bool("cheats", "infiniteAmmo", false);
@@ -1079,6 +1085,7 @@ Progress::Cheats Progress::cheats() const {
 bool Progress::command_code(const std::string& raw, std::string& what, std::string& log, std::vector<std::string>& frames) {
     const std::string code = normalize_code(raw);
     std::lock_guard<std::mutex> g(mu_);
+    if (code.empty() || !settings_["redeem"]["enabled"].as_bool(true)) return false;
     auto toggle = [&](const char* key, const char* label) {
         Json& st = state_["cheats"];
         bool cur = st[key].is_bool() ? st[key].as_bool() : setting_bool("cheats", key, false);
@@ -1098,7 +1105,8 @@ bool Progress::command_code(const std::string& raw, std::string& what, std::stri
         touch_locked(true);
         return true;
     }
-    if (code == normalize_code(settings_["bots"]["code"].as_string("BOTMATCH"))) {
+    const std::string bot_code = normalize_code(settings_["bots"]["code"].as_string("BOTMATCH"));
+    if (!bot_code.empty() && code == bot_code) {
         log = "local bot match requested (" + std::to_string(setting_int("bots", "count", 6)) + " bots)";
         what = "botmatch";
         return true;
