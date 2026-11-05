@@ -386,7 +386,14 @@ void rm_caches_in(const std::string& dir, int depth, int& budget) {
         std::string n = e->d_name;
         if (n == "." || n == "..") continue;
         std::string p = dir + "/" + n;
-        bool is_cache = (n == "fed_links.bin") ||
+        // compliancy.bin: the Restrictions (legislation) config cache. The client caches
+        // compliancy.json BEFORE validating it (CacheConfigJson 0x138a930), and an early
+        // build served "{}", so the encrypted cache holds an object that parses but has
+        // no LegislationTypes. The cache check (0x1389e18) accepts it, the network fetch
+        // is skipped forever, and ParseConfigJson fails with 0x1c -> "compliancy error
+        // 28" every login (docs/research/02 §14). Deleting it forces one fetch of our
+        // valid compliancy.json, which the client then re-caches.
+        bool is_cache = (n == "fed_links.bin") || (n == "compliancy.bin") ||
                         (n.size() >= 10 && n.compare(n.size() - 10, 10, "_cache.bin") == 0);
         if (is_cache) {
             if (unlink(p.c_str()) == 0) logi("[diag] cleared stale url cache: %s", p.c_str());

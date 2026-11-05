@@ -388,3 +388,53 @@ player still saw the popup over a black screen — consistent with the *first* f
 **Diagnostics added:** `install_login_error_hook()` replaces `SetLoginError` with a logger
 (`login-error: SetLoginError("<code>") caller=+0x…`) that then performs the original
 assignment, so the next run names every remaining login error exactly.
+
+## 14. Device round 4d2aeda: datacenter fixed; two remaining codes decoded
+
+Status: **[V]** device log `b349c322`/`bba41ee8` + static RE (workflow: 3 investigations,
+each adversarially verified; key claims re-checked by hand).
+
+The `_datacenter_id` fix worked: the first login now runs `2→0→3→4→6→5→7→8` (no `glrer`).
+The SetLoginError hook names the two remaining codes, identical on every attempt:
+
+**A. `compliancy error 28` (state 5, caller `0xbcded8`) — poisoned on-device cache.**
+State 5 calls ProcessCompliancy `0x13961e8` → Restrictions::Init `0x13c56c0`, which first
+checks the encrypted cache `compliancy.bin` (`0x1389e18` → `0x138c130`, name char-built).
+On 11-04 an early build's catch-all answered `compliancy.json` with `{}`; the client caches
+the reply *before* validating it (CacheConfigJson `0x138a930`). `{}` is a valid JSON
+object, so every later login takes the cache, never fetches our (valid) compliancy.json
+(no request for it in any later log), and ParseConfigJson `0x138d9f8` fails "Missing
+LegislationTypes" → 0x1c = 28. The only deleter (Reset `0x1394020`) runs only after a
+successful parse, so it never self-heals. State 5 still always proceeds to state 7, but the
+error string is cleared only by StartLogin — nothing on the success path clears it — so it
+would raise the popup even after a state-9 success (the gate-patched build `d19de46f`
+reached state 9 six times and each was followed by the popup → StartLogin(2)).
+**Fix:** `diag.cpp` deletes `compliancy.bin` at boot (with fed_links/`*_cache.bin`);
+compliancy.json additionally carries `"StoreType":["google"]` (hardening against the
+unresolved `0x1390e48("20.0.0", LegislationVersion)` direction).
+
+**B. `gl` (state 8, caller `0xbce584`) — the game_portal/Anubis connection never starts.**
+Correction to §10/§12: `gateObj = *(app+0x1b8)` is the **game_portal "Anubis" manager**
+(ctor `0xc05610`, vtable `0x1b0b230`, "Anubis Manager Thread", TCP handler `0xc09780`:
+TCP_Profile/TCP_Config/TCP_LVLFile/…) — i.e. the TS meta channel of 01-phase1b §3.
+`+0xEC` ("controller session established") is set only by `0xc05870` from the Anubis FSM
+`0xc071d8` (state global `0x1bc5834`) state 10 (`0xc07754`) once flags `+0xb0,b1,b3,b4`
+are set by TCP messages 0x22, 0x3e/0x3f (TCP_Config), 0x4a and connection event 2. The
+earlier `0x707a90`/`0xb00508` attribution was an ICF artifact (in-match entity component).
+State 8 (`0xbce054`): waits only while `+0x94>0` (Anubis attempt running); gate `+0xEC` →
+state 9; else `counter(0x1bc43c8)++` and retry `0xc07020`; on the 4th pump
+`SetLoginError("gl"+suffix 0x1bc5840)` → state 11. `0xc07020` looks up **`"game_portal"`**
+in the eve urls object; ours omits it (removed in 4e4a65e on a mistaken "1 KB parser"
+theory), so nothing starts, the suffix stays empty, and "gl" fires within one second. The
+`gldah*` strings built on that path are dead (never passed on). Don't patch the getter
+`0x707ec0`: it is ICF-shared by 8 functions (vertex-attribute count, loop bounds, entity
+highlight…), which may explain the old black screen.
+
+Options for B: (1) **real fix** = M1 meta channel: add `game_portal` to eve urls, serve the
+Anubis state-3 request (`quick_join_ah`, `server_type=ts` → `room_id`, `controller_host`,
+`controller_tcp_port`, `encrypted_access_token`), run the Anubis controller + TS on
+loopback and send 0x22 / 0x3e TCP_Config / 0x4a / event 2 / TCP_Profile within the Anubis
+and login-wide (`online+0x254`, 180 s) timeouts; partial progress shows up as
+`gl<code>` (`glaca`, `glavct`, `glatg_<st>_<ms>_D_<b0><b3><b1><b4>`). (2) **stopgap** =
+call-site patch at `0xbce06c` `bl 0x707ec0` (`95 e7 ec 97`) → `mov w0,#1` (`20 00 80 52`),
+with game_portal kept out; reaches state 9 but delivers no profile.
