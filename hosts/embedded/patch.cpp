@@ -51,9 +51,9 @@ const unsigned char kIrisLogFp[16] = {0xff, 0x03, 0x01, 0xd1, 0xf3, 0x13, 0x00, 
 // the game decides after login and what re-triggers the loop. Continuation trampolines
 // log (label, x0, x1, x2, caller-LR) then run the original intact; all four targets have
 // position-independent prologues (checked).
-constexpr uintptr_t kTrOnLoginCompleted = 0x1354158; // Gaia -> Lua onLoginCompleted
-constexpr uintptr_t kTrOnLoginFailed    = 0x1354418; // Gaia -> Lua onLoginFailed(code in w2)
-constexpr uintptr_t kTrOnDisconnected   = 0x1353fb8; // Gaia -> Lua onDisconnected
+[[maybe_unused]] constexpr uintptr_t kTrOnLoginCompleted = 0x1354158; // Gaia -> Lua onLoginCompleted
+[[maybe_unused]] constexpr uintptr_t kTrOnLoginFailed    = 0x1354418; // Gaia -> Lua onLoginFailed(code in w2)
+[[maybe_unused]] constexpr uintptr_t kTrOnDisconnected   = 0x1353fb8; // Gaia -> Lua onDisconnected
 constexpr uintptr_t kTrStartLogin       = 0xbcd410;  // OnlineFramework StartLogin (re-login trigger)
 
 // Round 3 proved: HTTP chain completes every cycle, but NONE of the three Gaia->Lua
@@ -70,7 +70,21 @@ constexpr uintptr_t kFsmStateWord = 0x1bc434c;  // FSM state global (int)
 // handler 0xb00508 (handler(this, msg); msg[0xe] u8, msg[0xf] u8) via setter 0x707a90.
 // Hook 0xb00508 to learn whether this handler EVER fires and, via its caller-LR, what
 // delivers the connection-state message (invisible to static analysis — bound callback).
-constexpr uintptr_t kTrConnHandler = 0xb00508;  // connection-state handler (sets +0xEC path)
+[[maybe_unused]] constexpr uintptr_t kTrConnHandler = 0xb00508;  // connection-state handler (sets +0xEC path)
+
+// Round 6: the popup's real trigger (static RE, docs/research/02 §12). The front-end
+// manager's per-frame check 0xb30438 enters "connection lost" via 0xb30d80 when
+//   conn = mgr->+0x10;  lost = !conn || (conn->u8[0x6c]==0 && conn->i32[0x98] != 2)
+// i.e. connection SLOT 0 of the network-session object is not CONNECTED(2). Slots are
+// set by 0x8cc370 (state=1 connecting, +0x90 handle) and 0x8cc3b0 (state=2 connected),
+// filled via 0x8cc228 (local path: connecting then connected at once) or
+// 0xae5928 -> 0x8ccdf0 (remote path with a handshake). Trace which path runs.
+constexpr uintptr_t kTrEnterConnLost = 0xb30d80;  // front-end: enter connection-lost (state 1)
+constexpr uintptr_t kTrSlotConnecting = 0x8cc370; // conn slot -> 1 (connecting)
+constexpr uintptr_t kTrSlotConnected  = 0x8cc3b0; // conn slot -> 2 (connected)
+constexpr uintptr_t kTrConnLocal      = 0x8cc228; // local/self path (connect + mark connected)
+constexpr uintptr_t kTrConnRemote     = 0xae5928; // front-end remote connect (asio)
+constexpr uintptr_t kTrConnHandshake  = 0x8ccdf0; // remote handshake -> mark connected
 
 uintptr_t g_mc5_base = 0; // cached libMC5 base for LR->file-offset in trace logs
 
@@ -200,6 +214,25 @@ extern "C" void mc5_trace_conn(const char* /*label*/, unsigned long long /*x0*/,
     }
     logi("conn-handler: msg=0x%llx [0xa]=%u [0xc]=%u [0xe]=%u [0xf]=%u lr=+0x%llx",
          msg, a, c, e, f, off);
+}
+
+// Front-end "enter connection-lost" 0xb30d80(mgr /*x0*/): dump exactly why — the
+// network-session object (mgr+0x10) and its slot-0 state (+0x98, needs 2), the +0x6c
+// override byte, slot-0 handle (+0x90), and the front-end state (mgr+0xB454).
+extern "C" void mc5_trace_connlost(const char* /*label*/, unsigned long long mgr,
+                                   unsigned long long /*x1*/, unsigned long long /*x2*/,
+                                   unsigned long long lr) {
+    unsigned long long off = (g_mc5_base && lr >= g_mc5_base) ? (lr - g_mc5_base) : lr;
+    if (mgr == 0) { logi("conn-lost: mgr=0 lr=+0x%llx", off); return; }
+    unsigned long long conn = *reinterpret_cast<volatile unsigned long long*>(mgr + 0x10);
+    unsigned fe = *reinterpret_cast<volatile unsigned*>(mgr + 0xB454);
+    if (conn == 0) { logi("conn-lost: mgr=0x%llx conn=NULL fe_state=%u lr=+0x%llx", mgr, fe, off); return; }
+    int s0 = *reinterpret_cast<volatile int*>(conn + 0x98);
+    int s1 = *reinterpret_cast<volatile int*>(conn + 0x9c);
+    unsigned o6c = *reinterpret_cast<volatile unsigned char*>(conn + 0x6c);
+    unsigned long long h0 = *reinterpret_cast<volatile unsigned long long*>(conn + 0x90);
+    logi("conn-lost: mgr=0x%llx conn=0x%llx slot0_state=%d slot1_state=%d u8[0x6c]=%u slot0_handle=0x%llx fe_state=%u lr=+0x%llx",
+         mgr, conn, s0, s1, o6c, h0, fe, off);
 }
 
 // Reject relocating an instruction that is PC-relative (adr/adrp, b/bl, b.cond,
@@ -362,13 +395,17 @@ int install_login_trace_hooks() {
     void* gen = reinterpret_cast<void*>(&mc5_trace);
     void* fsm = reinterpret_cast<void*>(&mc5_trace_fsm);
     int n = 0;
-    n += install_trace_hook("onLoginCompleted", base + kTrOnLoginCompleted, gen);
-    n += install_trace_hook("onLoginFailed",    base + kTrOnLoginFailed,    gen);
-    n += install_trace_hook("onDisconnected",   base + kTrOnDisconnected,   gen);
+    // Rounds 3-5 hooks on onLogin*/onDisconnected/ConnHandler never fired and are dropped
+    // to keep the log lean (definitions kept for reference).
     n += install_trace_hook("StartLogin",       base + kTrStartLogin,       gen);
     n += install_trace_hook("LoginFSM",         base + kTrLoginFSM,         fsm);
-    n += install_trace_hook("ConnHandler",      base + kTrConnHandler,      reinterpret_cast<void*>(&mc5_trace_conn));
-    logi("trace-hooks: %d/6 Gaia login-event entry hooks installed", n);
+    n += install_trace_hook("EnterConnLost",    base + kTrEnterConnLost,    reinterpret_cast<void*>(&mc5_trace_connlost));
+    n += install_trace_hook("SlotConnecting",   base + kTrSlotConnecting,   gen);
+    n += install_trace_hook("SlotConnected",    base + kTrSlotConnected,    gen);
+    n += install_trace_hook("ConnLocal",        base + kTrConnLocal,        gen);
+    n += install_trace_hook("ConnRemote",       base + kTrConnRemote,       gen);
+    n += install_trace_hook("ConnHandshake",    base + kTrConnHandshake,    gen);
+    logi("trace-hooks: %d/8 login/connection hooks installed", n);
     return n;
 }
 
