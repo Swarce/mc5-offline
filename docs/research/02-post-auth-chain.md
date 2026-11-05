@@ -515,3 +515,30 @@ The full client-derived spec is in [03-anubis-ts-spec.md](03-anubis-ts-spec.md).
   8. keepalives
 - Poller: anubis fsm 2→3→1→4→5→1→8→1→9→10, then b0/b3/b4 = 1, then b1 = 1, then EC=1 and 94=0. After that login moves 8→9.
 - On failure, the `anubis-suffix` line names the step. The table is in 03 §6; in `atg_…_D_wxyz` the four digits are the flags in the order b0 b3 b1 b4.
+
+## 16. Device round 82f4034: login passes; first-run flow reaches consent, then a pre-tutorial error
+
+**What worked.** The game_portal/Anubis chain behaved exactly as the §15 oracle predicted, in about 3 s:
+- federation session #1, then the controller greet and `connect game` (nonce_type=targeted, mode 0)
+- 0x01 InitSettings arrived at +529 ms, then the burst, then 0x49→0x4a and 0x16
+- b0, b2, b3 and b4 were set together; b1 followed about 2 s later (main-thread pump); then EC=1
+- login went 7→8→9
+- the TS link stayed up for the rest of the run, with keepalives
+
+The player reached the age/gender screen and the privacy (Didomi) dialog. Then a "connection error" appeared just before the first tutorial mission loaded. SetLoginError, EnterConnLost and the Anubis suffix hook all stayed silent, so this is a different popup path.
+
+The privacy dialog appeared 3 times (12:39, 12:48, 12:55). Each acceptance sent TS 0xad plus `POST storage/profiles/me/myprofile/consent`.
+
+**Client requests we left unanswered:**
+- TS 0x50 `00000002 0000 0000` (u32, str, str)
+- TS 0x0b `{"display_name":"SOLDIER_10643"}\n`
+- TS 0x34 (empty)
+- TS 0x52 (empty)
+- TS 0xad `"true" "true" "true"`, sent 3 times
+
+**HTTP requests our catch-all answered with 200 `{}`:**
+- the storage consent POST
+- asset `GameOptions` and `use_custom_param` (HEAD and GET)
+- asset `events_HD_UPD18` and `videos_HD_UPD18`, plus their `metadata/hash`
+
+The `mc5-postlogin-tutorial-gap` workflow is mapping what each of these expects.
