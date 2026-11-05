@@ -73,6 +73,12 @@ void start_locked(const std::string& data_dir) {
         const char* kPkg = "com.gameloft.android.ANMP.GloftM5HM";
         // Game-thread services the server can ask for (cheats, zone walk, bot match).
         mc5::gameplay::set_context(g_ctx.get());
+        {
+            mc5::Json b = g_ctx->progress.settings()["bots"];
+            mc5::gameplay::configure_quick_play(b["quickPlay"].as_bool(true),
+                                                static_cast<int>(b["searchSecondsMin"].as_int(3)),
+                                                static_cast<int>(b["searchSecondsMax"].as_int(8)));
+        }
         g_ctx->host.apply_cheats = [](bool g, bool a, bool m) { mc5::gameplay::queue_cheats(g, a, m); };
         g_ctx->host.request_zone_walk = [] { mc5::gameplay::queue_zone_walk(); };
         g_ctx->host.start_bot_match = [](int n) { return mc5::gameplay::queue_bot_match(n); };

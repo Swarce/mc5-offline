@@ -93,7 +93,14 @@ over the internet.
 | `UNLOCKZONES` | opens every campaign zone |
 | `GODMODE` / `INFINITEAMMO` / `INFINITEMEDKITS` | toggle the game's own debug cheats; they persist and are re-applied at each mission start |
 | `CHEATSOFF` | turns all three off |
-| `BOTMATCH` | **experimental:** starts a local multiplayer match with you as the host and `bots.count` bots. Open the Multiplayer menu once first |
+| `BOTMATCH` | **experimental:** starts a local free-for-all match with you as the host and `bots.count` bots. Open the Multiplayer menu once first |
+
+**Multiplayer Quick Play** works offline:
+* Pick a mode and press Quick Play. The game shows its own SEARCHING screen for a few seconds, then starts a match in
+  that mode.
+* You are the host, and every other slot is filled with AI bots. Teams are balanced by the game.
+* Battle Royale is not hosted offline.
+* Settings: `bots.quickPlay` (on/off), `bots.searchSecondsMin` / `bots.searchSecondsMax`.
 
 **Campaign zones** open the way they did online. Once you have finished every story mission of a zone, the next
 zone unlocks when you return to the menu. The server reads the zone and mission list from your own game data.

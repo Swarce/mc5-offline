@@ -12,6 +12,7 @@
 #include "gameplay.hpp"
 
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <cstring>
 #include <map>
@@ -43,9 +44,25 @@ std::chrono::steady_clock::time_point g_walk_at{};
 std::mutex g_walk_mu;
 std::atomic<int> g_botmatch_pending{0}; // bot count requested (0 = none)
 std::atomic<int> g_bots_armed{0};       // bots to set on the next bot manager seen
+std::atomic<bool> g_qp_enabled{true};
+std::atomic<int> g_qp_search_min{3}, g_qp_search_max{8};
 std::atomic<uintptr_t> g_last_bm{0};
 void* g_pushed_st = nullptr;  // our MultiplayerStartLocalGame state (game thread only)
 int g_pushed_frames = 0;
+// Bots for the running local match: re-asserted on every bot tick (game thread).
+std::atomic<int> g_bot_target{0};
+std::atomic<bool> g_local_active{false}; // a local match we started is (being) hosted
+
+// Quick Play -> local hosted match (game thread only; QPM::Update and the pump share it).
+struct QuickPlay {
+    bool active = false;      // parked search in progress
+    bool fire = false;        // start the local match on the next pump
+    uintptr_t qpm = 0;
+    int mode = -1, cap = 0, map = -1;
+    long deadline_ms = 0;
+} g_qp;
+// Parameters the 0xae3828 hook applies to the local-host settings (set when QP fires).
+struct HostSettings { bool use = false; int mode = -1, cap = 0, map = -1; } g_hs;
 
 bool rd(uintptr_t a, void* out, std::size_t n) {
     if (a < 0x1000) return false;
@@ -168,6 +185,7 @@ void start_bot_match_now(int bots) {
         return;
     }
     reinterpret_cast<void (*)(void*, int)>(g_base + 0x836ee0)(mp, 1);
+    g_local_active.store(true);
     void* g = reinterpret_cast<Fptr>(g_base + 0x4e04a8)();
     if (!g) { logw("[botmatch] NOT started: no game object"); return; }
     void* st = reinterpret_cast<void* (*)(std::size_t)>(g_base + 0x31fb48)(0x40);
@@ -181,6 +199,7 @@ void start_bot_match_now(int bots) {
         reinterpret_cast<void (*)(void*, std::string*)>(vt[0x50 / 8])(top, &s);
     }
     g_bots_armed.store(bots);
+    g_bot_target.store(bots);
     g_last_bm.store(0);
     g_pushed_st = st;
     g_pushed_frames = 0;
@@ -223,6 +242,122 @@ void watch_local_match() {
     if (mp) reinterpret_cast<void (*)(void*, int)>(g_base + 0x836ee0)(mp, 0);
     g_pushed_st = nullptr;
     g_bots_armed.store(0);
+    g_bot_target.store(0);
+    g_local_active.store(false);
+}
+
+// The hosted match registers the host's own player entry via MP->vt[0xc8] = 0xae3a70:
+// SetLocalId(0), then AddPlayer 0xae3ad0 with state 4 -- and AddPlayer keeps the id
+// only for state 1 (0xae3b20 cmp / 0xae3b30 csinv), so the entry gets id -1. Shipping
+// clients were never the host, so this never mattered; for us the lookup 0xa62f58
+// (id == local id) then fails and 0x799210 crashes at 0x799390. Give the host's entry
+// (in use, slot 0, state 4, id -1) the local id. Entry = MP+0x1d0+k*0x28: +0 u16 in-use,
+// +0x16 slot, +0x18 s16 id, +0x1b state, +0x20 info.
+void repair_host_entry(const char* where) {
+    void* mp = reinterpret_cast<void* (*)()>(g_base + 0x4e2108)();
+    uintptr_t m = reinterpret_cast<uintptr_t>(mp);
+    std::int32_t lid = -1;
+    if (m < 0x1000 || !rdv(m + 0x15d0, lid) || lid < 0 || lid > 0x7f) return;
+    int candidate = -1;
+    for (int k = 0; k < 128; ++k) {
+        uintptr_t e = m + 0x1d0 + 0x28ull * k;
+        std::uint16_t used = 0;
+        std::int16_t id = 0;
+        unsigned char slot = 0, st = 0;
+        if (!rdv(e, used) || !rdv(e + 0x18, id)) return;
+        if (id == lid) return; // already resolvable
+        if (used == 1 && id == -1 && rdv(e + 0x16, slot) && rdv(e + 0x1b, st) && slot == 0 && st == 4 && candidate < 0)
+            candidate = k;
+    }
+    if (candidate < 0) return;
+    *reinterpret_cast<volatile std::int16_t*>(m + 0x1d0 + 0x28ull * candidate + 0x18) = static_cast<std::int16_t>(lid);
+    logi("[botmatch] host player entry %d: id -1 -> %d (%s)", candidate, lid, where);
+}
+
+// Mission start 0x799210 (MP branch looks the local player up by id): repair first.
+extern "C" void mc5_mission_start_hook(const char*, unsigned long long, unsigned long long, unsigned long long,
+                                       unsigned long long) {
+    if (g_local_active.load()) repair_host_entry("mission start");
+}
+
+// Settings copy 0xae3828(MP, settings) -- only the call from the local-host state
+// (return address 0x8377b0 inside 0x837588) is touched: substitute the Quick Play mode
+// record, map and capacity the player picked (the game's local host always used mode
+// record 0 and its capacity). Records R = *(*(MP+0xb338)+0x110), 12 x 0x38 bytes:
+// [0] = R[m]+0x14, [4] = map, [8] = capacity, [0xc] = R[m]+0x30 * 60000 ms,
+// [0x10] = R[m]+0x2c -- exactly what the Quick Play builder 0xbf1da0 writes.
+extern "C" void mc5_settings_hook(const char*, unsigned long long x0, unsigned long long x1, unsigned long long,
+                                  unsigned long long lr) {
+    if (!g_hs.use || lr != g_base + 0x8377b0) return;
+    g_hs.use = false;
+    uintptr_t mp = static_cast<uintptr_t>(x0), b338 = 0, recs = 0;
+    if (mp < 0x1000 || !rdv(mp + 0xb338, b338) || !rdv(b338 + 0x110, recs) || recs < 0x1000) return;
+    std::int32_t* st = reinterpret_cast<std::int32_t*>(x1);
+    std::int32_t before[5];
+    if (!rd(static_cast<uintptr_t>(x1), before, sizeof(before))) return;
+    if (g_hs.mode >= 0 && g_hs.mode < 12) {
+        std::int32_t gm = 0, t = 0, f2c = 0;
+        uintptr_t r = recs + 0x38ull * g_hs.mode;
+        if (rdv(r + 0x14, gm) && rdv(r + 0x30, t) && rdv(r + 0x2c, f2c)) {
+            st[0] = gm;
+            if (t > 0 && t < 120) st[3] = t * 60000;
+            st[4] = f2c;
+        }
+    }
+    if (g_hs.map >= 0 && g_hs.map < 64) st[1] = g_hs.map;
+    if (g_hs.cap >= 2 && g_hs.cap <= 13) st[2] = g_hs.cap;
+    logi("[quickplay] local host settings: mode %d->%d map %d->%d players %d->%d time %d->%d ms (QP mode id %d)",
+         before[0], st[0], before[1], st[1], before[2], st[2], before[3], st[3], g_hs.mode);
+}
+
+// QPM::Update 0xbe6ce8 (game thread, every frame). The native Quick Play FSM is flow
+// QPM+0x516c == 1 with its state in .bss 0x1bc4604; state 2 is "start searching" and
+// would send automatch to Gameloft's matchmaker (dead). Instead: park the FSM on state 1
+// (no case in the flow-1 switch) and keep its 60 s timeout clock QPM+0x5170 fresh, so the
+// game's own SEARCHING screen stays up for a few seconds; then start a locally hosted
+// match with the player's mode and capacity (QPM+0x52c4 / +0x52c8 / map hint +0x52c0).
+constexpr uintptr_t kQpState = 0x1bc4604;
+extern "C" void mc5_qp_update_hook(const char*, unsigned long long x0, unsigned long long, unsigned long long,
+                                   unsigned long long) {
+    try {
+    uintptr_t qpm = static_cast<uintptr_t>(x0);
+    if (qpm < 0x1000 || !g_seq_ok) return;
+    std::int32_t flow = 0, state = 0;
+    if (!rdv(qpm + 0x516c, flow) || !rdv(g_base + kQpState, state)) return;
+    auto now_ms = [] { return static_cast<long>(reinterpret_cast<int (*)()>(g_base + 0x4e1c98)()); };
+    if (!g_qp.active) {
+        if (flow != 1 || state != 2 || g_pushed_st || !g_qp_enabled.load()) return;
+        std::int32_t mode = -1, cap = 0, map = -1;
+        rdv(qpm + 0x52c4, mode);
+        rdv(qpm + 0x52c8, cap);
+        rdv(qpm + 0x52c0, map);
+        if (mode < 0 || mode >= 12 || mode == 8) {
+            logw("[quickplay] mode id %d is not hosted offline (Battle Royale / unknown); leaving the native flow", mode);
+            return;
+        }
+        g_qp.active = true;
+        g_qp.fire = false;
+        g_qp.qpm = qpm;
+        g_qp.mode = mode;
+        g_qp.cap = cap < 2 ? 2 : (cap > 13 ? 13 : cap);
+        g_qp.map = map;
+        int lo = g_qp_search_min.load(), hi = g_qp_search_max.load();
+        if (hi < lo) hi = lo;
+        g_qp.deadline_ms = now_ms() + 1000L * (lo + static_cast<int>(static_cast<unsigned>(rand()) % (hi - lo + 1)));
+        logi("[quickplay] Quick Play mode id %d, %d players (map hint %d): searching locally, then hosting with %d bots",
+             mode, g_qp.cap, map, g_qp.cap - 1);
+    }
+    if (flow != 1) {
+        logi("[quickplay] search cancelled by the player");
+        g_qp.active = false;
+        return;
+    }
+    *reinterpret_cast<volatile std::int32_t*>(g_base + kQpState) = 1;          // parked
+    *reinterpret_cast<volatile std::int32_t*>(qpm + 0x5170) = static_cast<std::int32_t>(now_ms()); // no 'qpte'
+    if (!g_qp.fire && now_ms() >= g_qp.deadline_ms) g_qp.fire = true;
+    } catch (...) {
+        logw("[gameplay] exception in the Quick Play hook (ignored)");
+    }
 }
 
 // --- hooks --------------------------------------------------------------------
@@ -230,6 +365,25 @@ extern "C" void mc5_pump_hook(const char*, unsigned long long, unsigned long lon
                               unsigned long long) {
     try {
     watch_local_match();
+    if (g_local_active.load()) repair_host_entry("frame");
+    if (g_qp.active && g_qp.fire) {
+        g_qp.active = false;
+        g_qp.fire = false;
+        if (g_pushed_st) {
+            logw("[quickplay] a local match is already starting");
+        } else {
+            g_hs = HostSettings{true, g_qp.mode, g_qp.cap, g_qp.map};
+            start_bot_match_now(g_qp.cap - 1);
+            if (g_pushed_st) {
+                // Release the native Quick Play flow: clear flow 1 (0xbf08a8) and its state.
+                reinterpret_cast<void (*)(void*, int)>(g_base + 0xbf08a8)(reinterpret_cast<void*>(g_qp.qpm), 1);
+                *reinterpret_cast<volatile std::int32_t*>(g_base + kQpState) = 0;
+            } else {
+                // Refused (logged): leave the native flow parked; its own 60 s timeout ends it.
+                g_hs.use = false;
+            }
+        }
+    }
     if (g_cheats_pending.exchange(false)) apply_cheats_now();
     if (g_walk_pending.load()) {
         bool due;
@@ -253,26 +407,35 @@ extern "C" void mc5_pump_hook(const char*, unsigned long long, unsigned long lon
 // (bots.bin), dereferenced by 0xb41a80 / 0xc42270: must be non-NULL.
 extern "C" void mc5_bot_tick_hook(const char*, unsigned long long x0, unsigned long long, unsigned long long,
                                   unsigned long long) {
-    int n = g_bots_armed.load();
+    int n = g_bot_target.load();
     if (n <= 0) return;
     uintptr_t bm = static_cast<uintptr_t>(x0), data = 0;
-    if (bm < 0x1000 || g_last_bm.load() == bm) return;
+    if (bm < 0x1000) return;
     if (!rdv(bm + 0x20, data) || data < 0x1000) return; // bots data not loaded yet
+    // The local player must hold its id first, or the free-id search 0xae3dd8 (which skips
+    // negative ids) would hand id 0 -- the local player's -- to the first bot.
+    repair_host_entry("bot tick");
     std::int32_t c58 = 0;
-    unsigned char b3 = 0;
     rdv(bm + 0x58, c58);
-    rdv(bm + 3, b3);
-    *reinterpret_cast<volatile std::int32_t*>(bm + 0x58) = n;
-    *reinterpret_cast<volatile unsigned char*>(bm + 3) = 1;
-    g_last_bm.store(bm);
-    g_bots_armed.store(0); // one bot manager per BOTMATCH
-    logi("[bots] bot manager 0x%llx (data 0x%llx): bots %d -> %d, fill armed (bm+3 %d -> 1)",
-         static_cast<unsigned long long>(bm), static_cast<unsigned long long>(data), c58, n, b3);
+    if (c58 != n) {
+        *reinterpret_cast<volatile std::int32_t*>(bm + 0x58) = n;
+        *reinterpret_cast<volatile unsigned char*>(bm + 3) = 1;
+        *reinterpret_cast<volatile std::int32_t*>(bm + 0x60) = 0;
+        if (g_last_bm.exchange(bm) != bm || c58 != 0)
+            logi("[bots] bot manager 0x%llx (data 0x%llx): bot target %d -> %d, type-0 fill armed",
+                 static_cast<unsigned long long>(bm), static_cast<unsigned long long>(data), c58, n);
+    }
 }
 
 } // namespace
 
 void set_context(ServerContext* ctx) { g_ctx = ctx; }
+
+void configure_quick_play(bool enabled, int search_min_s, int search_max_s) {
+    g_qp_enabled.store(enabled);
+    g_qp_search_min.store(search_min_s < 0 ? 0 : (search_min_s > 60 ? 60 : search_min_s));
+    g_qp_search_max.store(search_max_s < 0 ? 0 : (search_max_s > 60 ? 60 : search_max_s));
+}
 
 int install() {
     g_base = libmc5_base();
@@ -287,7 +450,16 @@ int install() {
                                                  0xfd, 0x43, 0x00, 0x91, 0x08, 0x58, 0x40, 0xb9};
     int n = install_entry_hook("GamePump(0x5f5128)", 0x5f5128, kPumpFp, reinterpret_cast<void*>(&mc5_pump_hook));
     n += install_entry_hook("BotTick(0xb083a8)", 0xb083a8, kBotTickFp, reinterpret_cast<void*>(&mc5_bot_tick_hook));
-    logi("[gameplay] %d/2 hooks; local-match sequence %s, settings getter %s, campaign getter %s", n,
+    static const unsigned char kQpUpdFp[16] = {0xf3, 0x0f, 0x1e, 0xf8, 0xfd, 0x7b, 0x01, 0xa9,
+                                               0xfd, 0x43, 0x00, 0x91, 0xf3, 0x03, 0x00, 0xaa};
+    static const unsigned char kSettingsFp[16] = {0xf4, 0x4f, 0xbe, 0xa9, 0xfd, 0x7b, 0x01, 0xa9,
+                                                  0xfd, 0x43, 0x00, 0x91, 0x28, 0x58, 0x40, 0x39};
+    static const unsigned char kMissionFp[16] = {0xff, 0x03, 0x01, 0xd1, 0xf6, 0x57, 0x01, 0xa9,
+                                                 0xf4, 0x4f, 0x02, 0xa9, 0xfd, 0x7b, 0x03, 0xa9};
+    n += install_entry_hook("QuickPlayUpdate(0xbe6ce8)", 0xbe6ce8, kQpUpdFp, reinterpret_cast<void*>(&mc5_qp_update_hook));
+    n += install_entry_hook("MatchSettings(0xae3828)", 0xae3828, kSettingsFp, reinterpret_cast<void*>(&mc5_settings_hook));
+    n += install_entry_hook("MissionStart(0x799210)", 0x799210, kMissionFp, reinterpret_cast<void*>(&mc5_mission_start_hook));
+    logi("[gameplay] %d/5 hooks; local-match sequence %s, settings getter %s, campaign getter %s", n,
          g_seq_ok ? "ok" : "MISMATCH", g_settings_ok ? "ok" : "MISMATCH", g_camp_ok ? "ok" : "MISMATCH");
     return n;
 }

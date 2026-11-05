@@ -10,6 +10,8 @@ namespace mc5 {
 namespace gameplay {
 
 void set_context(ServerContext* ctx);
+// Quick Play -> locally hosted match with bots (settings bots.quickPlay / searchSeconds*).
+void configure_quick_play(bool enabled, int search_min_s, int search_max_s);
 // Installs the per-frame pump hook and the bot tick hook (after libMC5 is loaded).
 int install();
 // Queued for the next game frame:

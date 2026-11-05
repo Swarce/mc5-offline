@@ -56,6 +56,33 @@ zone-table offsets (`0x8e2810`, `0x8e2d60`, `0x64f5f8`, `0x5c2d30`, `0x4f85b0`),
   * **Command codes.** They respect `redeem.enabled`, and an empty `bots.code` is ignored.
   * **Known, harmless:** `_inventory_shadow.unlocked_zones` is ignored by the client loader, which only reads `upd_`
     keys. The home page then sends one 0x48 per session, which we log.
+* **Quick Play with bots** (wf `mc5-quickplay-bots`; device crash of round afd918a root-caused). Pressing Quick Play
+  on any mode except Battle Royale shows the game's own SEARCHING screen for 3-8 s, then hosts a local match in the
+  mode and with the capacity the player picked, and fills every other slot with AI bots.
+  * **Root cause of the 0x799390 crash.** The hosted match registers the host's own player entry through
+    `MP->vt[0xc8]` = `0xae3a70`. That call does SetLocalId(0), then AddPlayer `0xae3ad0` with state 4. AddPlayer keeps
+    the id only for state 1 (`0xae3b20 cmp w8,#1` / `0xae3b30 csinv`), so the entry got id −1. `0xa62f58` then finds
+    no entry with id 0, and `0x799210` writes through NULL. Shipping clients were never the host, so this never
+    happened in production.
+  * **Fix: `repair_host_entry`.** On the game thread, each frame of a local match, at entry of `0x799210`, and before
+    every bot fill, the host's entry (in use, slot 0, state 4, id −1) gets the local id. Otherwise the free-id search
+    `0xae3dd8`, which skips negative ids, would also give id 0 to the first bot.
+  * **Hook on `QPM::Update` `0xbe6ce8`.** It runs on the game thread every frame. When the native flow 1 reaches
+    state 2 (start searching), the hook:
+    * reads the mode `QPM+0x52c4`, the capacity `+0x52c8` and the map hint `+0x52c0`;
+    * parks the FSM on state 1 (`.bss 0x1bc4604`), which has no case in the flow-1 switch;
+    * refreshes the 60 s timeout clock `QPM+0x5170` with `now()` `0x4e1c98`;
+    * then starts the local host from the pump and releases flow 1 (`0xbf08a8(QPM,1)`, state 0).
+
+    Cancelling the search (flow ≠ 1) aborts it. Mode 8 (BR, 71 players) and unknown ids (≥ 12) keep the native flow,
+    which fails with "no room". Flow 9 is not touched.
+  * **Hook on `0xae3828`,** only when the return address is `0x8377b0` (the call from the local-host state `0x837588`).
+    It overwrites mode = `R[m]+0x14`, map, capacity (2..13), time = `R[m]+0x30` × 60000 and `R[m]+0x2c`, the same
+    fields Quick Play's own builder `0xbf1da0` writes. `R` = `*(*(MP+0xb338)+0x110)`.
+  * **Bots.** The bot-tick hook re-asserts `bm+0x58` = capacity−1, `bm+3` = 1 and `bm+0x60` = 0 on every tick.
+    `0xb41a80` adds one type-0 bot at a time. Teams are balanced by the game (`ChooseTeam 0xaf1030`). Type-0 bots get
+    the base AI controller from round start (`G:0x810d70`).
+  * **Settings:** `bots.quickPlay` (default true), `bots.searchSecondsMin` / `searchSecondsMax` (3 / 8).
 * **Not done:** a real debug menu (Tier 2, which needs the AS3 value ABI). `has_debug_info_menu` is **not** sent,
   because it only shows an empty INFO page.
 

@@ -49,8 +49,8 @@ Response quick_join(ServerContext& ctx, const Request& req) {
     // Offline bot matches are started locally instead (redeem code BOTMATCH).
     const std::string am = req.param("automatcher");
     if (am.compare(0, 9, "quickplay") == 0) {
-        logi("matchmaker: Quick Play '%s' filter='%s' server_type='%s' -> [] (offline: use the BOTMATCH code "
-             "for a local bot match)", am.c_str(), req.value("filter").c_str(), req.value("server_type").c_str());
+        logi("matchmaker: Quick Play '%s' filter='%s' server_type='%s' -> [] (offline Quick Play is hosted "
+             "locally with bots by the in-game hook; reaching here means it was not)", am.c_str(), req.value("filter").c_str(), req.value("server_type").c_str());
         return Response::json("[]");
     }
     int n;

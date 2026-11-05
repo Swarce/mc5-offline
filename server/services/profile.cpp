@@ -33,7 +33,7 @@ const char* kDefaultSettings = R"JSON({
  "bald":{"mode":"mirror","holdMs":2000,"requireSizes":true},
  "campaign":{"zoneUnlock":"progress","zoneCap":0},
  "cheats":{"serve":true,"freeCredits":1000,"godMode":false,"infiniteAmmo":false,"infiniteMedkits":false},
- "bots":{"count":6,"code":"BOTMATCH"}
+ "bots":{"quickPlay":true,"searchSecondsMin":3,"searchSecondsMax":8,"count":6,"code":"BOTMATCH"}
 })JSON";
 
 constexpr long long kCurrencyCap = 2000000000LL;
