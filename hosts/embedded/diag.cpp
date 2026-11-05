@@ -443,7 +443,14 @@ bool is_our_bald_file(const std::string& p) {
     std::fclose(f);
     buf[n] = 0;
     std::string c(buf, n);
-    return c == "<dlc/>" || c.find("map_android_dlc_1") != std::string::npos;
+    // Exact: our map is the 6-byte "<dlc/>"; our toc/hashes name "..._map_android_dlc_1"
+    // followed by the closing quote (a real toc names e.g. "_map_android_dlc_97" or
+    // "_dlc_1xx", which must never match) and list it as the only, 6-byte asset.
+    if (c == "<dlc/>") return true;
+    bool our_name = c.find("_map_android_dlc_1\"") != std::string::npos;
+    bool tiny = c.find("\"file_size\":6,") != std::string::npos ||
+                c.find("\"assets\":[{\"name\":\"bald_android_") != std::string::npos;
+    return our_name && tiny && c.find("_dlc_gla2_") == std::string::npos && c.find("_mp_") == std::string::npos;
 }
 bool tree_has_marker(const std::string& dir, int depth) {
     DIR* d = opendir(dir.c_str());

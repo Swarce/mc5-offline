@@ -73,10 +73,15 @@ int main() {
         put(ours + "/sub/bald_android_astc_h_map_android_dlc_1", "<dlc/>");
         put(real + "/bald___index___.txt", "7");
         put(real + "/pack_01.dlc", "real dlc content");
+        // A real online-era toc naming map_android_dlc_1xx / _dlc_97 must never match.
+        put(real + "/bald___toc___.txt",
+            "{\"_version\":\"6.0.12a\",\"assets\":[{\"name\":\"bald_android_astc_h_z0_mp_gla2_7\"},"
+            "{\"name\":\"bald_android_astc_h_map_android_dlc_1\"},{\"name\":\"bald_android_astc_h_map_android_dlc_123\"}]}");
         CHECK(mc5::diag::remove_offline_bald_cache_in({ours, real, root + "/missing"}) == 1);
         struct stat st;
         CHECK(stat(ours.c_str(), &st) != 0);                       // ours: gone
         CHECK(stat((real + "/pack_01.dlc").c_str(), &st) == 0);     // real DLC: kept
+        CHECK(stat((real + "/bald___toc___.txt").c_str(), &st) == 0);
         std::string cmd = "rm -rf '" + root + "'";
         if (std::system(cmd.c_str()) != 0) std::fprintf(stderr, "cleanup failed\n");
     }
