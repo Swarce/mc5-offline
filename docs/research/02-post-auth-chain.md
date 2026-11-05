@@ -226,3 +226,32 @@ those four) will answer. Leading hypothesis: a post-login timeout waiting for a
 real-time "connected" confirmation (the alert/presence stream only receives SSE
 *comments* from us, never a real `connection` event), producing onLoginFailed/
 onDisconnected → the connection-error popup → retry.
+
+## 9. Confirmed: login FSM stalls post-HTTP; no terminal callback; Lua retries ~1/s (trace round 3)
+
+Status: **[V]** on-device (build `41d9647`/`89f79df`, logs `15499c18`, `1ce09c22`).
+
+With the login-event hooks working (after fixing a trampoline pad bug, `89f79df`), a long
+capture shows the loop unambiguously:
+- `StartLogin x1=0` from the OnlineFramework (`+0x833404`) = silent/BI phase.
+- `StartLogin x1=2` from the **Lua dispatcher** `0x8f4e40` (`+0x8fc7d8`) = the real login,
+  then repeated **once per second** (:05,:06,:07,:08…).
+- Every cycle runs the FULL HTTP chain (authorize→alert SSE→users/me→behavioral→
+  encrypt_token→social locates→`POST social/accounts/me`), **all 200**.
+- **None** of `onLoginCompleted` (`0x1354158`) / `onLoginFailed` (`0x1354418`) /
+  `onDisconnected` (`0x1353fb8`) EVER fire. Verified by entry hooks that patch the
+  function entry, so any call (incl. vtable `blr`) would log. `onLoginCompleted` and
+  `onDisconnected` have **no BL/B callers** at all (pure vtable dispatch); only
+  `onLoginFailed` is called directly (by the failed-state handler `0xbb96e8`).
+
+**Conclusion:** the Gaia login state machine completes the HTTP chain but never reaches
+the state that fires `onLoginCompleted`; the Lua login screen, never told the result,
+re-calls `StartLogin` ~1/s → the connection-error/retry loop. The stall is NOT an HTTP
+request/response (all 200) — it waits on something else after the chain (leading
+candidates: a real-time presence/"connection" event on the alert SSE stream — we send
+only SSE *comments*; or a subsystem readiness signal; or the TS/lobby connection).
+
+Round 4 (build `e8b6eb7`) hooks the FSM pump `0xbcdab0` and logs the state global
+`0x1bc434c` on change (`fsm-state: N`) to pinpoint the stall state (map: state 5 =
+compliancy, 9 ≈ terminal). `SetState 0xbcd600` is unhookable (two leading adrp, 24-byte
+leaf), so the pump is traced instead.
