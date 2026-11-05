@@ -431,8 +431,10 @@ void rm_caches_in(const std::string& dir, int depth, int& budget) {
 }
 #endif
 
-// True if `p` is a small regular file we authored for BALD: the 6-byte "<dlc/>" map or
-// a toc naming our "map_android_dlc_1" asset.
+// True if `p` is a small regular file an earlier offline build wrote into bald/: the
+// 6-byte "<dlc/>" map, or a toc/hashes naming only our "..._map_android_dlc_1" (a real
+// online-era toc names e.g. "_map_android_dlc_97" / "_dlc_1xx" and lists _mp_/_gla2_
+// assets, so it never matches). Mirrors server/services/bald_mirror.cpp.
 bool is_our_bald_file(const std::string& p) {
     struct stat st;
     if (stat(p.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > 4096) return false;
@@ -441,62 +443,42 @@ bool is_our_bald_file(const std::string& p) {
     char buf[4097];
     std::size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
     std::fclose(f);
-    buf[n] = 0;
     std::string c(buf, n);
-    // Exact: our map is the 6-byte "<dlc/>"; our toc/hashes name "..._map_android_dlc_1"
-    // followed by the closing quote (a real toc names e.g. "_map_android_dlc_97" or
-    // "_dlc_1xx", which must never match) and list it as the only, 6-byte asset.
     if (c == "<dlc/>") return true;
     bool our_name = c.find("_map_android_dlc_1\"") != std::string::npos;
     bool tiny = c.find("\"file_size\":6,") != std::string::npos ||
                 c.find("\"assets\":[{\"name\":\"bald_android_") != std::string::npos;
     return our_name && tiny && c.find("_dlc_gla2_") == std::string::npos && c.find("_mp_") == std::string::npos;
 }
-bool tree_has_marker(const std::string& dir, int depth) {
+
+// Deletes ONLY the individual marker files (never a directory or any other file: the
+// player's real DLC may share the folder). Depth-bounded.
+int unlink_markers(const std::string& dir, int depth) {
     DIR* d = opendir(dir.c_str());
-    if (!d) return false;
-    bool found = false;
-    struct dirent* e;
-    while (!found && (e = readdir(d)) != nullptr) {
-        std::string n = e->d_name;
-        if (n == "." || n == "..") continue;
-        std::string p = dir + "/" + n;
-        struct stat st;
-        if (stat(p.c_str(), &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) { if (depth > 0) found = tree_has_marker(p, depth - 1); }
-        else found = is_our_bald_file(p);
-    }
-    closedir(d);
-    return found;
-}
-void rm_tree(const std::string& dir, int depth) {
-    DIR* d = opendir(dir.c_str());
-    if (!d) return;
+    if (!d) return 0;
+    int n = 0;
     struct dirent* e;
     std::vector<std::string> sub;
     while ((e = readdir(d)) != nullptr) {
-        std::string n = e->d_name;
-        if (n == "." || n == "..") continue;
-        std::string p = dir + "/" + n;
+        std::string nm = e->d_name;
+        if (nm == "." || nm == "..") continue;
+        std::string p = dir + "/" + nm;
         struct stat st;
         if (lstat(p.c_str(), &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) { if (depth > 0) sub.push_back(p); }
-        else if (unlink(p.c_str()) == 0) logi("[diag] removed offline BALD file: %s", p.c_str());
+        if (S_ISDIR(st.st_mode)) { if (depth > 0) sub.push_back(p); continue; }
+        if (S_ISREG(st.st_mode) && is_our_bald_file(p) && unlink(p.c_str()) == 0) {
+            logw("[diag] removed offline-build BALD marker file: %s", p.c_str());
+            ++n;
+        }
     }
     closedir(d);
-    for (const auto& s2 : sub) rm_tree(s2, depth - 1);
-    rmdir(dir.c_str());
+    for (const auto& s2 : sub) n += unlink_markers(s2, depth - 1);
+    return n;
 }
 
 int remove_offline_bald_cache_in(const std::vector<std::string>& dirs) {
     int removed = 0;
-    for (const std::string& d : dirs) {
-        if (!tree_has_marker(d, 2)) continue;
-        logw("[diag] %s holds the empty DLC map an earlier build served; removing it (BALD then "
-             "never becomes ready, as before)", d.c_str());
-        rm_tree(d, 2);
-        ++removed;
-    }
+    for (const std::string& d : dirs) removed += unlink_markers(d, 2);
     return removed;
 }
 

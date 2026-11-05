@@ -32,6 +32,7 @@ add_library(mc5server STATIC
   server/services/meta.cpp
   server/services/misc.cpp
   server/services/profile.cpp
+  server/services/bald_mirror.cpp
 )
 target_include_directories(mc5server PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(mc5server PUBLIC Threads::Threads)

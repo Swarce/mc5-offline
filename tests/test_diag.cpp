@@ -79,7 +79,8 @@ int main() {
             "{\"name\":\"bald_android_astc_h_map_android_dlc_1\"},{\"name\":\"bald_android_astc_h_map_android_dlc_123\"}]}");
         CHECK(mc5::diag::remove_offline_bald_cache_in({ours, real, root + "/missing"}) == 1);
         struct stat st;
-        CHECK(stat(ours.c_str(), &st) != 0);                       // ours: gone
+        CHECK(stat((ours + "/sub/bald_android_astc_h_map_android_dlc_1").c_str(), &st) != 0); // marker: gone
+        CHECK(stat((ours + "/bald___index___.txt").c_str(), &st) == 0); // any other file: kept
         CHECK(stat((real + "/pack_01.dlc").c_str(), &st) == 0);     // real DLC: kept
         CHECK(stat((real + "/bald___toc___.txt").c_str(), &st) == 0);
         std::string cmd = "rm -rf '" + root + "'";

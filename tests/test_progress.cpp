@@ -334,24 +334,25 @@ int main() {
         if (std::system(cmd.c_str()) != 0) std::fprintf(stderr, "cleanup failed\n");
     }
 
-    // --- settings migration: a v1 file's bald.serve=true (old default) is dropped ---
+    // --- settings migration: bald defaults written by v1/v2 are dropped; real choices kept ---
     {
         const std::string d3 = tmpdir();
         CHECK(mc5::store::mkdirs(d3));
         CHECK(mc5::store::save_atomic(d3 + "/settings.json",
-                                      "{\"bald\":{\"serve\":true},\"economy\":{\"startGold\":5}}"));
+                                      "{\"settingsVersion\":2,\"bald\":{\"serve\":false,\"holdMs\":2000},\"economy\":{\"startGold\":5}}"));
         mc5::Progress pr;
         pr.open(d3);
-        CHECK(!pr.settings()["bald"]["serve"].as_bool(true));
-        CHECK_EQ(pr.settings()["economy"]["startGold"].as_int(), 5); // real choices kept
+        CHECK_EQ(pr.settings()["bald"]["mode"].as_string(""), std::string("mirror"));
+        CHECK(!pr.settings()["bald"].contains("serve"));
+        CHECK_EQ(pr.settings()["economy"]["startGold"].as_int(), 5);
         Json disk;
         CHECK(mc5::store::load_json(d3 + "/settings.json", disk));
-        CHECK_EQ(disk["settingsVersion"].as_int(), 2);
-        // A v2 file keeps an explicit bald.serve=true.
-        CHECK(mc5::store::save_atomic(d3 + "/settings.json", "{\"settingsVersion\":2,\"bald\":{\"serve\":true}}"));
+        CHECK_EQ(disk["settingsVersion"].as_int(), 3);
+        // A v3 file keeps an explicit choice.
+        CHECK(mc5::store::save_atomic(d3 + "/settings.json", "{\"settingsVersion\":3,\"bald\":{\"mode\":\"off\"}}"));
         mc5::Progress p2;
         p2.open(d3);
-        CHECK(p2.settings()["bald"]["serve"].as_bool(false));
+        CHECK_EQ(p2.settings()["bald"]["mode"].as_string(""), std::string("off"));
         std::string cmd = "rm -rf '" + d3.substr(0, d3.rfind('/')) + "'";
         if (std::system(cmd.c_str()) != 0) std::fprintf(stderr, "cleanup failed\n");
     }
@@ -368,58 +369,125 @@ int main() {
         CHECK_EQ(back.size(), std::size_t(3000));
     }
 
-    // --- BALD asset replies (stop the 404 retry storm) ---
+    // --- BALD local mirror: answer the index from the player's own folder, nothing else ---
     {
+        const std::string root = tmpdir();
+        const std::string B = root + "/bald";
+        CHECK(mc5::store::mkdirs(B));
+        const std::string pre = "bald_android_astc_h_";
+        // A folder shaped like an online-era one (synthetic content, real layout).
+        std::string mapx = "<?xml version=\"1.0\"?><dlc><mandatory><p name=\"vehicles_dlc\" size=\"5\"/></mandatory>"
+                           "<locations><loc name=\"z0_mp\"><p name=\"z0_mp\" size=\"7\"/><p name=\"z0_mp_lvl\" size=\"3\"/></loc>"
+                           "<loc name=\"z3_venice\"><p name=\"z3_venice\" size=\"4\"/></loc></locations></dlc>";
+        struct A { std::string name, body; };
+        std::vector<A> assets = {{pre + "vehicles_dlc_gla2_1", "VVVVV"}, {pre + "z0_mp_gla2_7", "MMMMMMM"},
+                                 {pre + "z0_mp_lvl_gla2_80", "LLL"}, {pre + "z3_venice_gla2_2", "ZZZZ"},
+                                 {pre + "map_android_dlc_97", mapx}};
+        auto write_all = [&](const std::string& index, const std::string& version, bool with_venice) {
+            Json toc = Json::object(), hs = Json::array();
+            toc["_hash"] = "x";
+            toc["_version"] = "6.0.12a";
+            Json al = Json::array();
+            for (const auto& a2 : assets) {
+                Json e = Json::object(); e["name"] = a2.name; al.push_back(e);
+                Json h = Json::object();
+                h["chunk_size"] = 2097152; h["file_size"] = static_cast<long long>(a2.body.size());
+                Json hh = Json::array(); hh.push_back("00000000000000000000000000000000"); h["hashes"] = hh;
+                h["name"] = a2.name; hs.push_back(h);
+                if (a2.name.find("venice") == std::string::npos || with_venice) CHECK(mc5::store::save_atomic(B + "/" + a2.name, a2.body));
+            }
+            toc["assets"] = al;
+            CHECK(mc5::store::save_atomic(B + "/bald___toc___.txt", toc.dump()));
+            CHECK(mc5::store::save_atomic(B + "/bald___hashes___.txt", hs.dump()));
+            CHECK(mc5::store::save_atomic(B + "/bald___index___.txt", index));
+            CHECK(mc5::store::save_atomic(B + "/bald___version___.txt", version));
+        };
+        auto run = [&]() { return mc5::BaldMirror::run({root + "/nope", B}, "android_astc_h", true); };
+
+        write_all("244", "6.0.12a", true);
+        mc5::BaldPreflight ok = run();
+        CHECK(ok.ok);
+        CHECK_EQ(ok.index_bytes, std::string("244"));
+        CHECK_EQ(ok.present, std::size_t(5));
+        CHECK_EQ(ok.locations.size(), std::size_t(2));
+
+        // A missing zone file is soft: still ready, the zone just stays not downloaded.
+        ::unlink((B + "/" + pre + "z3_venice_gla2_2").c_str());
+        mc5::BaldPreflight soft = run();
+        CHECK(soft.ok);
+        CHECK_EQ(soft.present, std::size_t(4));
+
+        // Hard gates (each would mean a state-2 re-download/erase or a wrapper crash).
+        write_all("244\n", "6.0.12a", true);
+        CHECK(!run().ok);                                   // H2 whitespace
+        write_all("244", "6.0.11", true);
+        CHECK(!run().ok);                                   // H1 version
+        write_all("244", "6.0.12a", true);
+        CHECK(mc5::store::save_atomic(B + "/" + pre + "z0_mp_gla2_7", "MM"));
+        CHECK(!run().ok);                                   // H10 truncated payload
+        write_all("244", "6.0.12a", true);
+        std::string nomp = mapx;
+        nomp.replace(nomp.find("name=\"z0_mp\">"), 13, "name=\"z9_xx\">");
+        CHECK(mc5::store::save_atomic(B + "/" + pre + "map_android_dlc_97", nomp));
+        assets.back().body = nomp;
+        write_all("244", "6.0.12a", true);
+        CHECK(!run().ok);                                   // H9 no z0_mp location (0xb63614)
+        assets.back().body = mapx;
+        std::string badpack = mapx;
+        badpack.replace(badpack.find("\"z0_mp_lvl\""), 11, "\"z0_nothere\"");
+        assets.back().body = badpack;
+        write_all("244", "6.0.12a", true);
+        CHECK(!run().ok);                                   // H9 pack without toc entry
+        assets.back().body = "<dlc/>";
+        write_all("244", "6.0.12a", true);
+        CHECK(!run().ok);                                   // H7/H9 old empty map
+        assets.back().body = mapx;
+        write_all("244", "6.0.12a", true);
+        CHECK(run().ok);
+
+        // Through the router: index -> 200 exact bytes; toc and payloads -> 404, always.
         mc5::Router router;
         mc5::ServerContext ctx;
-        ctx.progress.open(dir);
-        {   // Default: BALD is NOT served (the empty map crashed the menu on device); the
-            // 404 is held for bald.holdMs. Use a short hold here.
-            Json st;
-            CHECK(mc5::store::load_json(dir + "/settings.json", st));
-            CHECK(!st["bald"]["serve"].as_bool(true));
-        }
+        const std::string sd = root + "/MC5Offline";
+        CHECK(mc5::store::mkdirs(sd));
+        CHECK(mc5::store::save_atomic(sd + "/settings.json", "{\"settingsVersion\":3,\"bald\":{\"holdMs\":0}}"));
+        ctx.progress.open(sd);
+        ctx.bald.set_dirs({B});
         mc5::register_services(router, ctx);
-        auto get0 = [&](const std::string& path) {
+        auto get = [&](const std::string& path, const std::string& range) {
             mc5::Request rq;
             rq.method = "GET";
             rq.path = path;
+            if (!range.empty()) rq.headers["range"] = range;
             return router.route(rq);
         };
-        {
-            CHECK(mc5::store::save_atomic(dir + "/settings.json", "{\"settingsVersion\":2,\"bald\":{\"serve\":false,\"holdMs\":50}}"));
-            ctx.progress.open(dir);
-            auto t0 = std::chrono::steady_clock::now();
-            mc5::Response off = get0("/asset//assets/1924:56128:6.0.12a:android:googleplay/bald_android_astc_h___index");
-            CHECK_EQ(off.status, 404);
-            CHECK(std::chrono::steady_clock::now() - t0 >= std::chrono::milliseconds(45));
-            CHECK(mc5::store::save_atomic(dir + "/settings.json", "{\"settingsVersion\":2,\"bald\":{\"serve\":true}}"));
-            ctx.progress.open(dir);
-        }
-        auto get = [&](const std::string& path) {
-            mc5::Request rq;
-            rq.method = "GET";
-            rq.path = path;
-            return router.route(rq);
+        const std::string P = "/asset//assets/1924:56128:6.0.12a:android:googleplay/";
+        // Snapshot the folder: the mirror must never modify it.
+        auto snapshot = [&]() {
+            std::string sig;
+            for (const char* f : {"bald___index___.txt", "bald___toc___.txt", "bald___hashes___.txt", "bald___version___.txt"}) {
+                std::string c; mc5::store::read_file(B + "/" + f, c); sig += c + "|";
+            }
+            for (const auto& a2 : assets) { std::string c; mc5::store::read_file(B + "/" + a2.name, c); sig += c + "|"; }
+            return sig;
         };
-        const std::string pre = "/asset//assets/1924:56128:6.0.12a:android:googleplay/";
-        mc5::Response a = get(pre + "bald_android_astc_h___index");
-        CHECK_EQ(a.status, 200);
-        CHECK_EQ(a.body, std::string("1"));
-        mc5::Response t = get(pre + "bald_android_astc_h__toc_1");
-        CHECK_EQ(t.status, 200);
-        Json toc;
-        CHECK(Json::try_parse(t.body, toc));
-        CHECK_EQ(toc["toc"].at(0)["_version"].as_string(), std::string("6.0.12a"));
-        CHECK_EQ(toc["toc"].at(0)["assets"].at(0)["name"].as_string(),
-                 std::string("bald_android_astc_h_map_android_dlc_1"));
-        CHECK_EQ(toc["hashes"].at(0)["hashes"].at(0).as_string(), std::string("04ec0d2d9673bcf019d62fdc9f3e6e09"));
-        mc5::Response mp = get(pre + "bald_android_etc_l_map_android_dlc_1");
-        CHECK_EQ(mp.status, 200);
-        CHECK_EQ(mp.body, std::string("<dlc/>"));
-        CHECK_EQ(get(pre + "bald_android_astc_h_other").status, 404);
-        CHECK_EQ(get(pre + "GameOptions").status, 404);
-        CHECK(get("/_mc5/status").body.find("\"progress\"") != std::string::npos);
+        std::string before = snapshot();
+        mc5::Response ix = get(P + "bald_android_astc_h___index", "");
+        CHECK_EQ(ix.status, 200);
+        CHECK_EQ(ix.body, std::string("244"));
+        CHECK_EQ(get(P + "bald_android_astc_h__toc_244", "").status, 404);
+        CHECK_EQ(get(P + "bald_android_astc_h__toc_1", "").status, 404);
+        CHECK_EQ(get(P + "bald_android_astc_h_z3_venice_gla2_2", "bytes=0-3").status, 404);
+        CHECK_EQ(get(P + "bald_android_astc_h_map_android_dlc_97", "bytes=0-5").status, 404);
+        CHECK(snapshot() == before);
+        CHECK_EQ(get(P + "GameOptions", "").status, 404);
+        CHECK(get("/_mc5/status", "").body.find("\"progress\"") != std::string::npos);
+        // mode "off": 404 even with a good folder.
+        CHECK(mc5::store::save_atomic(sd + "/settings.json", "{\"settingsVersion\":3,\"bald\":{\"mode\":\"off\",\"holdMs\":0}}"));
+        ctx.progress.open(sd);
+        CHECK_EQ(get(P + "bald_android_astc_h___index", "").status, 404);
+        std::string cmd2 = "rm -rf '" + root.substr(0, root.rfind('/')) + "'";
+        if (std::system(cmd2.c_str()) != 0) std::fprintf(stderr, "cleanup failed\n");
     }
 
     std::string cmd = "rm -rf '" + dir.substr(0, dir.rfind('/')) + "'";

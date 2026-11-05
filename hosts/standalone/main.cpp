@@ -51,10 +51,11 @@ int main(int argc, char** argv) {
         else if (a == "--data-center") ctx.data_center = next("mc5");
         else if (a == "--client-id") ctx.client_id = next(ctx.client_id.c_str());
         else if (a == "--data-dir") ctx.progress.open(next(""));
+        else if (a == "--bald-dir") ctx.bald.set_dirs({next("")});
         else if (a == "--log-level") mc5::Log::instance().set_min_level(parse_level(next("debug")));
         else if (a == "--help") {
             std::puts("mc5-offline-standalone [--port N] [--bind ADDR] [--public-host H] "
-                      "[--scheme http|https] [--data-center DC] [--client-id ID] [--data-dir DIR] [--log-level L]");
+                      "[--scheme http|https] [--data-center DC] [--client-id ID] [--data-dir DIR] [--bald-dir DIR] [--log-level L]");
             return 0;
         }
     }

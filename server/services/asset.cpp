@@ -81,21 +81,24 @@ const char* kBehavioralJson =
 
 } // namespace
 
-// BALD (Gameloft's runtime-DLC manager, ctor G:0x136cfc8, name "android" + _astc|_etc
-// + _h|_l) GETs bald_<n>___index from a worker (G:0x1373a00) that retries ANY failure
-// every ~21 ms forever (no cap, no backoff, no status check): 404 caused 2680 GETs in
-// 70 s. A 200 "{}" only moves the storm to the toc, and a toc with no map entry makes
-// BALD "ready" with a NULL lookup -> SIGSEGV at 0x4 (G:0xc64570). So serve the three
-// terminal assets: index "1", a toc listing one asset (the empty DLC map), and the map
-// itself, "<dlc/>" (6 bytes, self-authored; md5 04ec0d2d9673bcf019d62fdc9f3e6e09).
-// DEVICE ROUND adee827 DISPROVED THIS. The empty map makes the DLC wrapper's load
-// routine 0xb62430 set +0x9c ("ready") while +0x94 (the current DLC entry, assigned
-// only when an entry matches the expected name at 0x1bb2990) stays -1. The menu query
-// 0xa1cf38 -> 0xb63620 then indexes entry -1 of the empty +0x10 vector (0x38 each):
-// SIGSEGV at 0xb63614 (ldrb [x0,#0x19], x0 = -0x38) a few seconds into the menu. So
-// serving is now OFF by default (settings bald.serve) and the 404 is held instead;
-// the bootstrap removes the cached empty map (diag::remove_offline_bald_cache).
-// Guarded when on: if the app dies soon after any BALD success, twice, serving stops.
+// BALD (Gameloft's runtime-DLC manager, ctor G:0x136cfc8, name "android" + _astc|_etc +
+// _h|_l): the campaign zones (z2_downtown .. z5_blackwater) and the MP maps (z0_mp) are
+// runtime DLC under <files>/bald. Its worker (G:0x1373a00) GETs bald_<n>___index and
+// retries ANY failure ~21 ms later, forever.
+//
+// We answer it from the player's OWN restored folder (bald_mirror.hpp, research/05):
+// the index request gets the exact bytes of their bald___index___.txt once a preflight
+// has proven every gate; BALD then byte-compares, accepts the local toc/hashes and the
+// files by existence, and is ready with no further request. Everything else BALD asks
+// for (toc, payload ranges) is NEVER answered: a served toc sends BALD to state 2, which
+// ERASES every local asset missing from it (G:0x1370880), and a payload whose bytes
+// differ is deleted after its post-check. Failures get a 404 held for bald.holdMs, which
+// slows the retry loop from ~38/s to one per holdMs (the GET is synchronous on BALD's
+// own worker thread; other requests interleave freely).
+//
+// History: an earlier build served index "1" + a one-asset toc + an empty "<dlc/>" map.
+// That crashed the menu (wrapper ready with no z0_mp entry, 0xb63614) and, with a real
+// folder present, would have erased it. It is gone; research/02 §20.
 static bool bald_name(const std::string& name, std::string& n, std::string& rest) {
     static const char* kNames[] = {"android_astc_h", "android_astc_l", "android_etc_h", "android_etc_l"};
     if (name.compare(0, 5, "bald_") != 0) return false;
@@ -106,33 +109,40 @@ static bool bald_name(const std::string& name, std::string& n, std::string& rest
     return false;
 }
 
-static Response bald_asset(ServerContext& ctx, const Request& req, const std::string& n, const std::string& rest) {
-    const std::string range = req.header("range");
-    auto bin = [](const std::string& body) {
-        Response r = Response::json(body, 200);
-        r.content_type = "application/octet-stream";
-        return r;
-    };
-    ctx.progress.guard_arm("bald", 60); // any BALD success can lead to "ready"
-    if (rest == "___index") {
-        logi("asset: BALD %s index -> 200 \"1\"%s%s", n.c_str(), range.empty() ? "" : " range=", range.c_str());
-        return bin("1");
-    }
-    if (rest == "__toc_1") {
-        std::string map = "bald_" + n + "_map_android_dlc_1";
-        std::string toc = "{\"hashes\":[{\"name\":\"" + map +
-                          "\",\"file_size\":6,\"chunk_size\":65536,\"hashes\":[\"04ec0d2d9673bcf019d62fdc9f3e6e09\"]}],"
-                          "\"toc\":[{\"_version\":\"6.0.12a\",\"assets\":[{\"name\":\"" + map + "\"}]}]}";
-        logi("asset: BALD %s toc_1 -> 200 (%zu B, one empty DLC map)", n.c_str(), toc.size());
-        return bin(toc);
-    }
-    if (rest == "_map_android_dlc_1") {
-        logi("asset: BALD %s map -> 200 \"<dlc/>\"%s%s", n.c_str(), range.empty() ? "" : " range=", range.c_str());
-        return bin("<dlc/>");
-    }
-    logw("asset: BALD %s unexpected '%s' -> 404 (this would retry forever)", n.c_str(), rest.c_str());
+static Response bald_held_404(ServerContext& ctx, const Request& req, const char* why) {
+    long hold = static_cast<long>(ctx.progress.settings()["bald"]["holdMs"].as_int(2000));
+    if (hold > 0 && hold <= 10000) std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+    static std::atomic<long> n404{0};
+    long k = ++n404;
+    if (k == 1 || k % 100 == 0)
+        logi("asset: BALD %s -> 404 after %ld ms hold (#%ld; %s)", req.param("name").c_str(), hold, k, why);
     Response r = Response::json("", 404);
     r.content_type = "text/plain";
+    return r;
+}
+
+static Response bald_request(ServerContext& ctx, const Request& req, const std::string& n, const std::string& rest) {
+    Json b = ctx.progress.settings()["bald"];
+    const std::string mode = b["mode"].as_string("mirror");
+    if (rest != "___index") {
+        // Toc (state 2: the erasing path) and payload ranges are never answered.
+        static std::atomic<long> warned{0};
+        if (warned.fetch_add(1) < 5)
+            logw("asset: BALD %s requested — never served (a toc would make BALD erase local files)",
+                 req.param("name").c_str());
+        return bald_held_404(ctx, req, "not served by design");
+    }
+    if (mode != "mirror") return bald_held_404(ctx, req, "settings bald.mode != mirror");
+    if (!ctx.progress.guard_allowed("bald")) return bald_held_404(ctx, req, "auto-disabled by the crash guard");
+    BaldPreflight p = ctx.bald.preflight(n, b["requireSizes"].as_bool(true));
+    if (!p.ok) return bald_held_404(ctx, req, "preflight failed; see [bald] FAIL lines");
+    ctx.progress.guard_arm("bald", 60);
+    static std::atomic<long> served{0};
+    if (served.fetch_add(1) < 3)
+        logi("asset: BALD %s -> 200 '%s' (the player's own index; BALD now uses the local DLC)",
+             req.param("name").c_str(), p.index_bytes.c_str());
+    Response r = Response::json(p.index_bytes, 200);
+    r.content_type = "application/octet-stream";
     return r;
 }
 
@@ -153,24 +163,7 @@ void register_asset(Router& router, ServerContext& ctx) {
     // Method "*" covers the HEAD probes (server.cpp sends no body for HEAD).
     router.add("*", "assets/{clientId}/{name}", [&ctx](const Request& req) {
         std::string n, rest;
-        if (bald_name(req.param("name"), n, rest)) {
-            Json b = ctx.progress.settings()["bald"];
-            if (b["serve"].as_bool(false) && ctx.progress.guard_allowed("bald")) return bald_asset(ctx, req, n, rest);
-            // Default: 404, as before M2 (BALD never becomes ready). The worker retries any
-            // failure ~21 ms later; holding the answer slows that from ~38/s to one per
-            // holdMs. The GET is synchronous on BALD's own worker thread (other requests
-            // interleave freely during the storm), so nothing else waits on it.
-            long hold = static_cast<long>(b["holdMs"].as_int(2000));
-            if (hold > 0 && hold <= 10000) std::this_thread::sleep_for(std::chrono::milliseconds(hold));
-            static std::atomic<long> n404{0};
-            long k = ++n404;
-            if (k == 1 || k % 100 == 0)
-                logi("asset: BALD %s -> 404 after %ld ms hold (#%ld; settings bald.serve=false)",
-                     req.param("name").c_str(), hold, k);
-            Response r = Response::json("", 404);
-            r.content_type = "text/plain";
-            return r;
-        }
+        if (bald_name(req.param("name"), n, rest)) return bald_request(ctx, req, n, rest);
         return asset_absent(req);
     });
     router.add("*", "assets/{clientId}/{name}/metadata", asset_absent);

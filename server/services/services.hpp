@@ -15,6 +15,7 @@
 
 #include "../core/http.hpp"
 #include "../core/sha1.hpp"
+#include "bald_mirror.hpp"
 #include "profile.hpp"
 
 namespace mc5 {
@@ -71,6 +72,10 @@ struct ServerContext {
     // The player's save + unlock codes (profile.hpp). The host calls
     // progress.open("<files>/MC5Offline") before serving; unopened = in memory.
     Progress progress;
+
+    // The player's own restored DLC folder (<files>/bald), answered read-only
+    // (bald_mirror.hpp). The host sets the candidate folders.
+    BaldMirror bald;
 
     // Anubis / TS meta-channel progress, shared by the Federation-sessions handler
     // (matchmaker.cpp) and the meta connection handler (meta.cpp); surfaced on

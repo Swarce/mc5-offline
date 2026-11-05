@@ -66,7 +66,14 @@ void start_locked(const std::string& data_dir) {
         if (!base.empty() && base.back() == '/') base.pop_back();
         g_ctx->progress.open(base.empty() ? std::string() : base + "/MC5Offline");
         mc5::diag::boot_trace("save loaded");
-        if (!g_ctx->progress.settings()["bald"]["serve"].as_bool(false)) mc5::diag::remove_offline_bald_cache();
+        // Only our own leftover marker files are removed; the player's DLC is never touched.
+        mc5::diag::remove_offline_bald_cache();
+        // The player's restored DLC folder, answered read-only (bald_mirror.hpp).
+        const char* kPkg = "com.gameloft.android.ANMP.GloftM5HM";
+        g_ctx->bald.set_dirs({std::string("/sdcard/Android/data/") + kPkg + "/files/bald",
+                              std::string("/storage/emulated/0/Android/data/") + kPkg + "/files/bald",
+                              std::string("/data/data/") + kPkg + "/files/bald",
+                              std::string("/data/user/0/") + kPkg + "/files/bald"});
     }
 
     mc5::ServerConfig cfg;
