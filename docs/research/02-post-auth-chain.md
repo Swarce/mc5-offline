@@ -748,3 +748,14 @@ Full reference: [04-progression.md](04-progression.md). Player-facing: [../ECONO
 - At boot, `diag::remove_offline_bald_cache()` deletes `files/bald/` trees that contain our `<dlc/>` map or a toc naming `map_android_dlc_1`. Trees without that marker (real DLC) are kept.
 - When serving is on, the guard now arms on any BALD success.
 - A real DLC map would need an entry matching `0x1bb2990`, or a patch to the `0xb63620` predicate. Neither is done.
+
+## 21. Device round 6f8e9be: saves and codes work; the restored DLC is not used (2026-11-05)
+
+**What worked:**
+- The menu no longer crashes.
+- Progress persists across launches.
+- The redeem codes work.
+
+**What did not work:** the player restored their online-era `files/bald` folder (index `244`, 52 assets ≈ 833 MB, `map_android_dlc_97`), but the campaign zones and MP maps still showed as fetching. The cause: BALD leaves state 1 only after a successful index GET, and we answered 404.
+
+**Fix:** the BALD local mirror. The server answers the index with the player's own index bytes after a preflight, and answers nothing else. Details are in [05-bald.md](05-bald.md). The research also showed that the old `bald.serve` path would have erased the restored folder through state 2's toc diff (`G:0x1370880`). That path is now removed, and the boot sweep deletes only individual marker files.

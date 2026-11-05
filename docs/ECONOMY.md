@@ -133,7 +133,7 @@ Created with these defaults on first launch. Unknown keys are ignored. MCVS name
 
 ```json
 {
- "settingsVersion":2,
+ "settingsVersion":3,
  "redeem":{"enabled":true,"codes":{},"popup":"auto"},
  "unlockAll":false,
  "unlocks":{"batchSize":400,"batchDelayMs":250,"startDelaySeconds":10,"live":true},
@@ -141,7 +141,7 @@ Created with these defaults on first launch. Unknown keys are ignored. MCVS name
             "codeCredits":1000000,"codeGold":100000,"purchases":"none"},
  "profile":{"send":true},
  "config":{"sendGame":true},
- "bald":{"serve":false,"holdMs":2000}
+ "bald":{"mode":"mirror","holdMs":2000,"requireSizes":true}
 }
 ```
 
@@ -158,7 +158,9 @@ Created with these defaults on first launch. Unknown keys are ignored. MCVS name
 | `economy.codeCredits` / `codeGold` | what `UNLOCKCURRENCY` adds |
 | `profile.send` | `false`: never send the save at login (every launch is a fresh account; the save is still recorded) |
 | `config.sendGame` | `false`: send the old empty game config (brings back the Profile → stats crash, unless the guard patch is on) |
-| `bald.serve` | default `false`: the DLC manager gets a 404 held for `bald.holdMs` ms (about one request every 2 s instead of ~40 a second). `true` serves an empty DLC map, which **crashed the menu** on device (research/02 §20); leave it off |
+| `bald.mode` | `"mirror"` (default): answer the DLC manager from **your own** restored `files/bald` folder (§6); `"off"`: always 404 (zones and MP maps stay "not downloaded") |
+| `bald.holdMs` | every DLC request the server does not answer waits this long before its 404, so the game's retry loop runs about once every 2 s instead of ~40 times a second |
+| `bald.requireSizes` | `true` (default): every file must have exactly the size your `bald___hashes___.txt` lists, or the mirror stays off (a truncated file would be mounted) |
 
 The environment variable `MC5_TS_PROFILE=0` also disables the login profile.
 
@@ -173,3 +175,33 @@ Two behaviours are guarded: the login profile apply (confirmed working on device
 * If the app dies before that on **two launches in a row**, the feature switches itself off and the log says so
   (`[guard] '<name>' AUTO-DISABLED`).
 * To try again, delete that entry from `state.json`.
+
+## 6. Campaign zones and MP maps (your own DLC backup)
+
+The campaign zones (Downtown, Venice, Construction, Blackwater), the multiplayer maps, vehicles and the outro video
+are runtime DLC that the game downloaded while it was online. They live in:
+
+```
+/sdcard/Android/data/com.gameloft.android.ANMP.GloftM5HM/files/bald/
+  bald___index___.txt  bald___version___.txt  bald___toc___.txt  bald___hashes___.txt
+  bald_android_astc_h_z0_mp_gla2_7   bald_android_astc_h_z3_venice_gla2_2   ...   (one file per asset)
+  bald_android_astc_h_map_android_dlc_<n>
+```
+
+If you restore that folder from your backup, MC5 Offline answers the game's DLC check with **your own** index file.
+The game then uses the files it already has. Nothing is downloaded, and nothing is shipped by this project.
+
+The folder is **read-only** to MC5 Offline. The server never writes, renames or deletes anything in it. It only reads
+the four `bald___*___.txt` files, the DLC map, and the file sizes. It also never sends the game a file list (toc),
+because a different list would make the game delete the assets that list leaves out. **Still, keep a copy of the
+folder off the phone.**
+
+At startup the server checks the folder and logs the result (`[bald] MIRROR READY …` or `[bald] FAIL …`):
+* the version file is exactly `6.0.12a`;
+* the index file has no newline;
+* every asset in the toc has exactly one entry in the hashes file;
+* every file has the right size;
+* the DLC map has an MP location `z0_mp`, and every pack it names is in the toc.
+
+If any check fails, the DLC stays "not downloaded", as before. Nothing is changed, and the log says which file to fix.
+A missing zone file is not an error: that zone alone stays "not downloaded".
