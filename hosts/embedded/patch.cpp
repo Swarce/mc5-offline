@@ -14,6 +14,8 @@
 
 #include "../../server/core/log.hpp"
 #include "gothook.hpp"
+#include "item_dump.hpp"
+#include <atomic>
 
 namespace mc5 {
 
@@ -790,6 +792,62 @@ int install_age_gate_diag() {
     return n;
 }
 
+// --- Unlock-code item lists from the player's own in-memory game data ---------------
+// Entry hooks on two game-thread TS builders: 0xc0e600 (0x53 redeem code: runs right
+// before the code is sent, so the server has the lists when it answers) and 0xc0b948
+// (0x16 loadout, sent after every login). The armory (A = *(base+0x1bbed40)) is filled
+// synchronously at boot, before login (0x4e5c10), so it is complete at either hook.
+// Reads go through process_vm_readv, so a bad pointer cannot fault the game.
+namespace {
+constexpr uintptr_t kArmoryGlobalVaddr = 0x1bbed40;  // armory singleton (getter 0x4e5f98)
+constexpr uintptr_t kKillsigMgrVaddr   = 0x1bbed00;  // killsig manager (getter 0x4e5f58)
+ItemSink g_item_sink = nullptr;
+std::atomic<int> g_item_dump_tries{0};
+std::atomic<bool> g_item_dump_done{false};
+
+bool vm_read(std::uint64_t addr, void* out, std::size_t n) {
+    if (addr < 0x1000 || n == 0) return n == 0;
+    iovec local{out, n};
+    iovec remote{reinterpret_cast<void*>(addr), n};
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(n);
+}
+
+extern "C" void mc5_item_dump_hook(const char* label, unsigned long long, unsigned long long,
+                                   unsigned long long, unsigned long long) {
+    if (g_item_dump_done.load() || !g_item_sink || g_item_dump_tries.fetch_add(1) >= 3) return;
+    std::uint64_t A = 0, M = 0;
+    vm_read(g_mc5_base + kArmoryGlobalVaddr, &A, 8);
+    vm_read(g_mc5_base + kKillsigMgrVaddr, &M, 8);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    itemdump::Result r = itemdump::dump(vm_read, A, M);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000;
+    for (const auto& n : r.notes) logi("item-dump: %s", n.c_str());
+    logi("item-dump: at %s, armory=0x%llx killsigs=0x%llx, %zu groups in %ld us", label,
+         static_cast<unsigned long long>(A), static_cast<unsigned long long>(M), r.groups.size(), us);
+    if (r.groups.count("weapons")) g_item_dump_done.store(true);
+    if (!r.groups.empty()) g_item_sink(r.groups, label);
+}
+} // namespace
+
+int install_item_dump_hooks(ItemSink sink) {
+    uintptr_t base = so_base("libMC5.so");
+    if (base == 0) { logw("item-dump: libMC5.so not loaded"); return 0; }
+    g_mc5_base = base;
+    g_item_sink = sink;
+    static const unsigned char kRedeemFp[16] = {0xfc, 0x57, 0xbd, 0xa9, 0xf4, 0x4f, 0x01, 0xa9,
+                                                0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91};
+    static const unsigned char kLoadoutFp[16] = {0xfc, 0x0f, 0x1b, 0xf8, 0xf8, 0x5f, 0x01, 0xa9,
+                                                 0xf6, 0x57, 0x02, 0xa9, 0xf4, 0x4f, 0x03, 0xa9};
+    int n = install_trace_hook_fp("RedeemSend(0x53)", base + 0xc0e600, kRedeemFp,
+                                  reinterpret_cast<void*>(&mc5_item_dump_hook));
+    n += install_trace_hook_fp("LoadoutSend(0x16)", base + 0xc0b948, kLoadoutFp,
+                               reinterpret_cast<void*>(&mc5_item_dump_hook));
+    logi("item-dump: %d/2 hooks installed (lists are read on the game thread before 0x53/0x16)", n);
+    return n;
+}
+
 int install_login_trace_hooks() {
     uintptr_t base = so_base("libMC5.so");
     if (base == 0) { logw("trace-hooks: libMC5.so not loaded"); return 0; }
@@ -928,6 +986,11 @@ int install_age_gate_diag() {
 
 int apply_levelup_rewards_guard() {
     logw("levelup-rewards-guard: no offset for this ABI (arm64 only)");
+    return 0;
+}
+
+int install_item_dump_hooks(ItemSink) {
+    logw("item-dump: no offsets for this ABI (arm64 only)");
     return 0;
 }
 

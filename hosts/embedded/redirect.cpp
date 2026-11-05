@@ -90,10 +90,10 @@ void install_now() {
 
 } // namespace
 
-void start_redirect_installer(int http_port, int tls_port) {
+void start_redirect_installer(int http_port, int tls_port, ItemSink item_sink) {
     g_http_port.store(http_port);
     g_tls_port.store(tls_port);
-    std::thread([] {
+    std::thread([item_sink] {
         // Our library loads before the game loads libMC5; wait for it to appear.
         for (int i = 0; i < 6000; ++i) { // up to ~60s at 10ms (patch before Gaia init)
             if (so_loaded("libMC5.so")) {
@@ -125,6 +125,9 @@ void start_redirect_installer(int http_port, int tls_port) {
                 // the primary fix; this covers any path that runs before it applies).
                 apply_levelup_rewards_guard();
                 diag::boot_trace("level-up rewards guard applied");
+                // Unlock-code item lists from the game's own armory (game thread).
+                if (item_sink) install_item_dump_hooks(item_sink);
+                diag::boot_trace("item dump hooks installed");
                 // NB: apply_libmc5_connected_gate() (force +0xEC true) is intentionally
                 // NOT called — it advanced the auth FSM to state 9 but did not satisfy the
                 // top-level onLoginCompleted latch (popup persisted behind a black menu),

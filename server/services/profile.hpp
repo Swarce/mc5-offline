@@ -157,6 +157,7 @@ private:
     std::map<std::string, std::chrono::steady_clock::time_point> armed_; // max() = confirmed
     std::string last_mission_key_;
     ItemUniverse universe_;
+    std::set<std::string> user_groups_; // groups from <dir>/items.json (they win over the dump)
 };
 
 } // namespace mc5

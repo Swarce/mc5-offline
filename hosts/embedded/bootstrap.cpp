@@ -14,6 +14,8 @@
 #include <jni.h>
 
 #include <atomic>
+#include <map>
+#include <vector>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -31,6 +33,15 @@ std::mutex g_mu;
 std::unique_ptr<mc5::Server> g_server;
 std::unique_ptr<mc5::ServerContext> g_ctx;
 std::atomic<bool> g_started{false};
+
+// Unlock-code item lists read from the game's memory (patch.cpp, game thread) -> the save.
+void on_item_lists(const std::map<std::string, std::vector<std::string>>& groups, const char* source) {
+    if (!g_ctx) return;
+    mc5::ItemUniverse u;
+    u.groups = groups;
+    u.source = std::string("in-game dump at ") + (source ? source : "?");
+    g_ctx->progress.set_universe(std::move(u));
+}
 
 void start_locked(const std::string& data_dir) {
     if (g_started.load()) return;
@@ -80,7 +91,7 @@ void start_locked(const std::string& data_dir) {
         mc5::diag::dump_threads("after server start");
         // Redirect libMC5's Gaia traffic to us once the game loads it. TLS port is
         // wired next; until then the https path is redirected but not yet served.
-        mc5::start_redirect_installer(g_ctx->port, g_ctx->port); // no TLS in M0: :443 also lands on http
+        mc5::start_redirect_installer(g_ctx->port, g_ctx->port, &on_item_lists); // no TLS in M0: :443 also lands on http
     } else {
         mc5::loge("libmc5offline: server failed to start");
         g_server.reset();

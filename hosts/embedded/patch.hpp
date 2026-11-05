@@ -11,6 +11,10 @@
 // C++17.
 #pragma once
 
+#include <map>
+#include <string>
+#include <vector>
+
 namespace mc5 {
 
 // Applies the http-redirect patches to the loaded libMC5 for the given server
@@ -78,5 +82,11 @@ int install_age_gate_diag();
 // unsized table yields an empty range instead of NULL (the Profile->stats crash at
 // 0x95e6ec). Returns 1 if applied.
 int apply_levelup_rewards_guard();
+
+// Unlock-code item lists read from the player's own in-memory armory/killsig tables
+// (item_dump.hpp) on the game thread, at the first 0x53 redeem or 0x16 loadout send.
+// The sink receives {"weapons","attachments","camos","gear","killsigs"} name lists.
+using ItemSink = void (*)(const std::map<std::string, std::vector<std::string>>& groups, const char* source);
+int install_item_dump_hooks(ItemSink sink);
 
 } // namespace mc5

@@ -198,12 +198,13 @@ const std::vector<CodeDef>& builtin_codes() {
     // Prerequisites first (classes before their weapons, weapons before attachments),
     // as in MCVS (mercs first; UnlockMerc_ALL_MAX crashed the reward display there).
     static const std::vector<CodeDef> k = {
-        {"UNLOCKALL", {"classes", "weapons", "attachments", "camos", "gear"}, false},
+        {"UNLOCKALL", {"classes", "weapons", "attachments", "camos", "gear", "killsigs"}, false},
         {"UNLOCKCLASSES", {"classes"}, false},
         {"UNLOCKWEAPONS", {"classes", "weapons"}, false},
         {"UNLOCKATTACHMENTS", {"weapons", "attachments"}, false},
         {"UNLOCKCAMOS", {"camos"}, false},
         {"UNLOCKGEAR", {"gear"}, false},
+        {"UNLOCKKILLSIGS", {"killsigs"}, false},
         {"UNLOCKCURRENCY", {}, true},
     };
     return k;
@@ -260,6 +261,7 @@ void Progress::load_locked() {
                     if (e.is_string() && !e.as_string().empty()) u.groups[kv.first].push_back(e.as_string());
             }
             u.source = dir_ + "/items.json";
+            for (const auto& kv : u.groups) user_groups_.insert(kv.first);
             universe_ = u;
             logi("[progress] item universe from %s (%zu groups)", u.source.c_str(), u.groups.size());
         }
@@ -736,8 +738,24 @@ void Progress::set_universe(ItemUniverse u) {
     std::lock_guard<std::mutex> g(mu_);
     std::size_t n = 0;
     for (const auto& kv : u.groups) n += kv.second.size();
-    logi("[progress] item universe set from %s: %zu names in %zu groups, catalog %zu", u.source.c_str(), n,
+    logi("[progress] item universe from %s: %zu names in %zu groups, catalog %zu", u.source.c_str(), n,
          u.groups.size(), u.catalog.size());
+    // The dump is written for the player to inspect (and to copy into items.json).
+    if (!dir_.empty() && store::mkdirs(dir_ + "/dumps")) {
+        Json d = Json::object();
+        for (const auto& kv : u.groups) {
+            Json a = Json::array();
+            for (const auto& s : kv.second) a.push_back(s);
+            d[kv.first] = a;
+        }
+        store::save_atomic(dir_ + "/dumps/items.json", d.dump());
+    }
+    // Groups the player supplied in items.json take precedence over the dump.
+    for (const std::string& grp : user_groups_) {
+        auto it = universe_.groups.find(grp);
+        if (it != universe_.groups.end()) u.groups[grp] = it->second;
+    }
+    for (const auto& c : universe_.catalog) u.catalog.insert(c);
     universe_ = std::move(u);
 }
 
@@ -811,14 +829,24 @@ RedeemOutcome Progress::grant_locked(const std::string& code, const std::vector<
     touch_locked(true);
     o.valid = true;
     // Live frames: batches of <= unlocks.batchSize keys, prerequisite order kept.
+    // The client's apply (0x5d2ba0 -> SetCount 0x5cf5d0 with no re-sort until the frame
+    // ends) appends new items unsorted but binary-searches the whole vector, so a key
+    // that already exists client-side can be missed after an append in the SAME frame
+    // and inserted twice. Currencies always exist, so they travel in a frame of their
+    // own; unlock items are new by construction (owned ones are skipped above).
     if (setting_bool("unlocks", "live", true)) {
         std::size_t bs = static_cast<std::size_t>(std::max<long long>(1, setting_int("unlocks", "batchSize", 400)));
-        for (std::size_t i = 0; i < grants.size(); i += bs) {
-            Json batch = Json::object();
-            for (std::size_t k = i; k < grants.size() && k < i + bs; ++k) batch[grants[k].first] = grants[k].second;
-            std::string f = frame_inventory_changes(batch);
-            if (f.empty()) { logw("[redeem] batch %zu too large; it applies at the next launch", i / bs); continue; }
-            o.frames.push_back(f);
+        std::vector<std::pair<std::string, long long>> items, money;
+        for (const auto& gkv : grants)
+            (gkv.first == kSoft || gkv.first == kHard ? money : items).push_back(gkv);
+        for (const auto* part : {&items, &money}) {
+            for (std::size_t i = 0; i < part->size(); i += bs) {
+                Json batch = Json::object();
+                for (std::size_t k = i; k < part->size() && k < i + bs; ++k) batch[(*part)[k].first] = (*part)[k].second;
+                std::string f = frame_inventory_changes(batch);
+                if (f.empty()) { logw("[redeem] batch %zu too large; it applies at the next launch", i / bs); continue; }
+                o.frames.push_back(f);
+            }
         }
     }
     // Reward popup (0x54): RedeemRewardPopup 0x9624e8 dereferences the catalog entry

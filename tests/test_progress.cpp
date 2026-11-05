@@ -258,6 +258,7 @@ int main() {
         CHECK(!pr.redeem("UNLOCKCURRENCY").valid);      // once per profile
         CHECK(pr.redeem("unlockcurrency2").valid);      // suffix redeems again
         CHECK_EQ(pr.status()["credits"].as_int(), 2000000);
+        // Custom code with items + currency: currencies go in their own frame.
         CHECK(!pr.redeem("NOTACODE").valid);
         CHECK(!pr.redeem("").valid);
         // Classes need no dump (the 11 class names are the client's own identifiers).
@@ -305,6 +306,31 @@ int main() {
         CHECK_EQ(pj["_inventory"]["wpn_899"].as_int(), 1);
         CHECK_EQ(pj["_inventory"]["diamond_dust"].as_int(), 2000000);
         pr.after_login_frame(0x24);
+    }
+
+    // --- custom codes: items and currency never share a frame ---
+    {
+        const std::string d2 = tmpdir();
+        CHECK(mc5::store::mkdirs(d2));
+        CHECK(mc5::store::save_atomic(d2 + "/settings.json",
+            "{\"redeem\":{\"codes\":{\"MyCode\":{\"items\":{\"knife_gold\":1},\"credits\":5000,\"gold\":7}}}}"));
+        mc5::Progress pr;
+        pr.open(d2);
+        mc5::RedeemOutcome o = pr.redeem("mycode");
+        CHECK(o.valid);
+        CHECK_EQ(o.frames.size(), std::size_t(2));
+        Json a, b;
+        CHECK(decode_grant(o.frames.at(0), a));
+        CHECK(decode_grant(o.frames.at(1), b));
+        CHECK_EQ(a.size(), std::size_t(1));
+        CHECK_EQ(a["knife_gold"].as_int(), 1);
+        CHECK_EQ(b["diamond_dust"].as_int(), 5000);
+        CHECK_EQ(b["credits"].as_int(), 7);
+        CHECK(!pr.redeem("MYCODE").valid);
+        // The defaults were merged under the user's file.
+        CHECK(pr.settings()["unlocks"]["batchSize"].as_int() == 400);
+        std::string cmd = "rm -rf '" + d2.substr(0, d2.rfind('/')) + "'";
+        if (std::system(cmd.c_str()) != 0) std::fprintf(stderr, "cleanup failed\n");
     }
 
     // --- 0x46 for one oversized batch ---
