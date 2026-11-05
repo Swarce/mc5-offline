@@ -19,14 +19,24 @@
 //        retry counter picks the text). See docs/research/02-post-auth-chain.md §13.
 //
 //   GET config/{clientId}/datacenters/{dc}/urls
-//     -> {"pandora":...,"game_portal":...,"ecomm_api_root":...,"crm_iap":..., ...}
-//        A JSON object of service -> URL, each <base><service>/. NO "status" key
-//        (any value shows an update/maintenance popup, an unknown one throws).
-//        pandora is required for every fed service; ecomm_api_root and crm_iap are
-//        located by IapStoreComponent.InitNative, which THROWS without them (this
-//        was the on-device boot loop: a urls object with only pandora made IAP init
-//        fail, so the client never advanced to pandora). Answered for any dc name
-//        (a client that played online before may have Gameloft's datacenter saved).
+//     -> {"status":"none","pandora":...,"federation":...,"ecomm_api_root":...,
+//         "crm_iap":...,"game_portal":...}
+//        A JSON object of service -> URL. "status":"none" is the only status that
+//        shows no update/maintenance popup. pandora is required for every fed
+//        service; ecomm_api_root and crm_iap are located by IapStoreComponent
+//        .InitNative, which THROWS without them. Answered for any dc name.
+//
+//        game_portal: read straight from this object (not via pandora) by the Anubis
+//        manager's Start 0xc07020 (eve lookup 0xc86e18, must be a non-empty JSON
+//        string). Without it Start returns 0, nothing connects, and login state 8
+//        fails with the bare code "gl". The client never uses it as an HTTP base or
+//        TCP target — it only forwards it (https->http, plus
+//        "/%d/190/private/OfficialScripts/mc5Portal.wsgi") to the TS inside
+//        ClientSendInitSettings — so no trailing slash.
+//        federation: its presence as a string selects Anubis mode 0 (POST
+//        <federation>/sessions/..., see matchmaker.cpp); without it the client takes
+//        mode 1, which needs a Gaia nonce exchange we have not mapped. Keep it.
+//        See docs/research/02-post-auth-chain.md §15.
 
 #include "services.hpp"
 
@@ -36,12 +46,11 @@
 namespace mc5 {
 
 namespace {
-// The native pandora-discovery parser reads the urls object into a fixed ~1 KB
-// buffer and fails (connection-error 0x1d) if it overruns — the 8-key response
-// (405 B) was enough to break it while the small datacenters array parsed fine.
-// So keep this to the minimum login needs: "pandora" (service discovery) and
-// "ecomm_api_root"/"crm_iap" (IAP init throws without them); "federation" too.
-// Everything else (auth, storage, game_portal, …) is located via pandora/locate.
+// Keep this to what login needs: "pandora" (service discovery), "ecomm_api_root"/
+// "crm_iap" (IAP init throws without them) and "federation" (selects Anubis mode 0);
+// "game_portal" is added separately (no trailing slash). Everything else (auth,
+// storage, matchmaker, …) is located via pandora/locate. (An older note blamed a
+// "~1 KB parse buffer" for an eve failure; that was refuted — 02 §14.B.)
 const char* kEveServices[] = {
     "pandora", "federation", "ecomm_api_root", "crm_iap",
 };
@@ -72,6 +81,7 @@ void register_eve(Router& router, ServerContext& ctx) {
         Json o = Json::object();
         o["status"] = "none";
         for (const char* svc : kEveServices) o[svc] = base + svc + "/";
+        o["game_portal"] = base + "game_portal"; // no trailing slash (client appends a path)
         return Response::json(o.dump());
     });
 }

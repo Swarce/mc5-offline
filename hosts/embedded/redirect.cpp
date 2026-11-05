@@ -115,6 +115,9 @@ void start_redirect_installer(int http_port, int tls_port) {
                 // game show "Failed to connect!"), with its caller. Behaviour unchanged.
                 install_login_error_hook();
                 diag::boot_trace("login error hook installed");
+                // Log the Anubis (game_portal) connect: failure suffix + FSM/flag poller.
+                install_anubis_diag();
+                diag::boot_trace("anubis diag installed");
                 // NB: apply_libmc5_connected_gate() (force +0xEC true) is intentionally
                 // NOT called — it advanced the auth FSM to state 9 but did not satisfy the
                 // top-level onLoginCompleted latch (popup persisted behind a black menu),

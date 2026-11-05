@@ -79,6 +79,8 @@ if(NOT ANDROID)
   add_executable(test_json tests/test_json.cpp)
   add_executable(test_router tests/test_router.cpp)
   target_link_libraries(test_router PRIVATE mc5server)
+  add_executable(test_anubis tests/test_anubis.cpp)
+  target_link_libraries(test_anubis PRIVATE mc5server Threads::Threads)
 
   # Victim library + GOT-hook test.
   add_library(victim MODULE tests/victim.cpp)
@@ -96,6 +98,7 @@ if(NOT ANDROID)
 
   add_test(NAME json COMMAND test_json)
   add_test(NAME router COMMAND test_router)
+  add_test(NAME anubis COMMAND test_anubis)
   add_test(NAME gothook COMMAND test_gothook)
   add_test(NAME diag COMMAND test_diag)
 endif()

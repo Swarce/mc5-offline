@@ -1,11 +1,15 @@
 #include "patch.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
 #include <string>
 #include <sys/mman.h>
+#include <sys/uio.h>
+#include <thread>
+#include <time.h>
 #include <unistd.h>
 
 #include "../../server/core/log.hpp"
@@ -209,6 +213,146 @@ extern "C" void* mc5_set_login_error(const void* code) {
     using AssignFn = void* (*)(void*, const void*);
     AssignFn assign = reinterpret_cast<AssignFn>(g_mc5_base + kStrAssignVaddr);
     return assign(reinterpret_cast<void*>(g_mc5_base + kLoginErrStrVaddr), code);
+}
+
+// --- Anubis (game_portal) connect diagnostics — docs/research/02 §15 ---------------
+// The Anubis manager's error-suffix setter 0xc07fd8 is the same 16-byte leaf shape as
+// SetLoginError: mov x1,x0 ; adrp x0 ; add x0,x0,#0x840 ; b 0x40b838 — it assigns the
+// failure code ("awri", "atg_10_<ms>_D_<b0b3b1b4>", "hte_17_0", …) to the global
+// std::string 0x1bc5840, which login state 8 later reports as "gl"+suffix.
+constexpr uintptr_t kAnubisSuffixVaddr    = 0xc07fd8;
+constexpr uintptr_t kAnubisSuffixStrVaddr = 0x1bc5840;
+const unsigned char kAnubisSuffixFp[16] = {0xe1, 0x03, 0x00, 0xaa, 0xe0, 0x7d, 0x00, 0xd0,
+                                           0x00, 0x00, 0x21, 0x91, 0x15, 0x0e, 0xe0, 0x17};
+
+std::string read_cxx_string(const void* sp) {
+    if (!sp) return std::string();
+    const unsigned char* p = static_cast<const unsigned char*>(sp);
+    const char* data;
+    std::size_t len;
+    if (p[0] & 1) { len = *reinterpret_cast<const std::size_t*>(p + 8);
+                    data = *reinterpret_cast<const char* const*>(p + 16); }
+    else          { len = p[0] >> 1; data = reinterpret_cast<const char*>(p + 1); }
+    if (!data) return std::string();
+    if (len > 256) len = 256;
+    return std::string(data, len);
+}
+
+extern "C" void* mc5_anubis_set_suffix(const void* code) {
+    unsigned long long lr = reinterpret_cast<unsigned long long>(__builtin_return_address(0));
+    unsigned long long off = (g_mc5_base && lr >= g_mc5_base) ? (lr - g_mc5_base) : lr;
+    std::string s = read_cxx_string(code);
+    if (!s.empty()) logw("anubis-suffix: '%s' (login error will read 'gl%s') caller=+0x%llx", s.c_str(), s.c_str(), off);
+    else            logi("anubis-suffix: cleared (caller=+0x%llx)", off);
+    using AssignFn = void* (*)(void*, const void*);
+    AssignFn assign = reinterpret_cast<AssignFn>(g_mc5_base + kStrAssignVaddr);
+    return assign(reinterpret_cast<void*>(g_mc5_base + kAnubisSuffixStrVaddr), code);
+}
+
+// Write the 16-byte "ldr x16,#8 ; br x16 ; <handler>" trampoline over a verified leaf.
+int install_leaf_jump(const char* label, uintptr_t site_addr, const unsigned char* fp, void* handler) {
+    void* site = reinterpret_cast<void*>(site_addr);
+    if (std::memcmp(site, fp, 16) != 0) {
+        logw("%s: fingerprint mismatch at %p (got %s) — refusing", label, site,
+             hexpre(reinterpret_cast<unsigned char*>(site), 16).c_str());
+        return 0;
+    }
+    unsigned char tramp[16] = {0x50, 0x00, 0x00, 0x58,  // ldr x16, #8
+                               0x00, 0x02, 0x1f, 0xd6}; // br  x16
+    std::memcpy(tramp + 8, &handler, sizeof(handler));
+    if (!set_prot(site, sizeof(tramp), PROT_READ | PROT_WRITE)) { loge("%s: mprotect RW failed", label); return 0; }
+    std::memcpy(site, tramp, sizeof(tramp));
+    set_prot(site, sizeof(tramp), PROT_READ | PROT_EXEC);
+    __builtin___clear_cache(reinterpret_cast<char*>(site), reinterpret_cast<char*>(site) + sizeof(tramp));
+    logi("%s: installed at %p", label, site);
+    return 1;
+}
+
+// Poller: snapshots the Anubis FSM globals, the gate object's flag bytes and the
+// controller connection state every 50 ms and logs a line only when something
+// changed. Every read goes through process_vm_readv on our own pid, so a stale or
+// unmapped pointer yields "unreadable" instead of a crash. Read-only.
+constexpr uintptr_t kOnlinePtrVaddr  = 0x1bc62e8; // global behind GOT 0x1b9b0d8 (0x4e46a0 -> 0x511cb8)
+constexpr uintptr_t kClockBaseVaddr  = 0x1bbe068; // u32 seconds base of the game clock 0x4e1c98
+constexpr uintptr_t kLoginStateVaddr = 0x1bc434c;
+constexpr uintptr_t kAnFsmVaddr      = 0x1bc5834;
+constexpr uintptr_t kAnOpVaddr       = 0x1bc5838;
+constexpr uintptr_t kAnIdleVaddr     = 0x1bc583c;
+constexpr uintptr_t kAnRetryVaddr    = 0x1bc585c;
+constexpr uintptr_t kAnGenVaddr      = 0x1bc5860;
+constexpr uintptr_t kAnModeVaddr     = 0x1bc586c;
+
+template <typename T>
+bool safe_read(uintptr_t addr, T& out) {
+    if (addr < 0x1000) return false;
+    iovec local{&out, sizeof(T)};
+    iovec remote{reinterpret_cast<void*>(addr), sizeof(T)};
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(sizeof(T));
+}
+
+struct AnubisSnap {
+    int login = -1, fsm = -1, op = -1, retry = -1, gen = -1;
+    int idle = -1, mode = -1;
+    int f58 = -1, f59 = -1, f94 = -1, b0 = -1, b1 = -1, b2 = -1, b3 = -1, b4 = -1, b5 = -1;
+    int ec = -1, f104 = -1, f105 = -1, f134 = -1;
+    int cc_state = -1, cc_2920 = -1, cc_reason = -1;
+    bool operator!=(const AnubisSnap& o) const { return std::memcmp(this, &o, sizeof(*this)) != 0; }
+};
+
+int rd8(uintptr_t a)  { unsigned char v; return safe_read(a, v) ? v : -1; }
+int rd32(uintptr_t a) { int v; return safe_read(a, v) ? v : -1; }
+
+void anubis_poll_loop(uintptr_t base) {
+    AnubisSnap last;
+    bool have_last = false, silent_logged = false;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        AnubisSnap s;
+        s.login = rd32(base + kLoginStateVaddr);
+        s.fsm = rd32(base + kAnFsmVaddr);
+        s.op = rd32(base + kAnOpVaddr);
+        s.idle = rd8(base + kAnIdleVaddr);
+        s.retry = rd32(base + kAnRetryVaddr);
+        s.gen = rd32(base + kAnGenVaddr);
+        s.mode = rd8(base + kAnModeVaddr);
+        uintptr_t online = 0, gate = 0, lobby = 0, cc = 0;
+        if (safe_read(base + kOnlinePtrVaddr, online) && online && safe_read(online + 0x1b8, gate) && gate) {
+            s.f58 = rd8(gate + 0x58);   s.f59 = rd8(gate + 0x59);  s.f94 = rd32(gate + 0x94);
+            s.b0 = rd8(gate + 0xb0);    s.b1 = rd8(gate + 0xb1);   s.b2 = rd8(gate + 0xb2);
+            s.b3 = rd8(gate + 0xb3);    s.b4 = rd8(gate + 0xb4);   s.b5 = rd8(gate + 0xb5);
+            s.ec = rd8(gate + 0xec);    s.f104 = rd8(gate + 0x104); s.f105 = rd8(gate + 0x105);
+            s.f134 = rd8(gate + 0x134);
+            if (safe_read(gate + 0x50, lobby) && lobby && safe_read(lobby + 0x28, cc) && cc) {
+                s.cc_state = rd32(cc + 0x2870);
+                s.cc_2920 = rd8(cc + 0x2920);
+                s.cc_reason = rd32(cc + 0x29bc);
+            }
+            // TS silence (proves the server keepalive): game clock now - gate+0x3c.
+            unsigned last_rx = 0, cbase = 0;
+            timespec ts{};
+            if (s.f58 == 1 && safe_read(gate + 0x3c, last_rx) && safe_read(base + kClockBaseVaddr, cbase) &&
+                clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+                long now_ms = (static_cast<long>(ts.tv_sec) - static_cast<long>(cbase)) * 1000 + ts.tv_nsec / 1000000;
+                long quiet = now_ms - static_cast<long>(last_rx);
+                if (quiet > 8000 && !silent_logged) {
+                    logw("anubis-poll: TS silent for %ldms (watchdog drops the link at 15000ms)", quiet);
+                    silent_logged = true;
+                } else if (quiet < 8000) {
+                    silent_logged = false;
+                }
+            }
+        }
+        if (!have_last || s != last) {
+            logi("anubis-poll: login=%d | anubis fsm=%d op=%d idle=%d retry=%d gen=%d mode=%d | "
+                 "gate 58=%d 59=%d 94=%d b0=%d b1=%d b2=%d b3=%d b4=%d b5=%d EC=%d 104=%d 105=%d 134=%d | "
+                 "cc state=%d 2920=%d reason=%d",
+                 s.login, s.fsm, s.op, s.idle, s.retry, s.gen, s.mode,
+                 s.f58, s.f59, s.f94, s.b0, s.b1, s.b2, s.b3, s.b4, s.b5, s.ec, s.f104, s.f105, s.f134,
+                 s.cc_state, s.cc_2920, s.cc_reason);
+            last = s;
+            have_last = true;
+        }
+    }
 }
 
 // Generic entry-trace callback: logs the function label, first two integer args and
@@ -454,6 +598,17 @@ int install_login_error_hook() {
     return 1;
 }
 
+int install_anubis_diag() {
+    uintptr_t base = so_base("libMC5.so");
+    if (base == 0) { logw("anubis-diag: libMC5.so not loaded"); return 0; }
+    g_mc5_base = base;
+    int n = install_leaf_jump("anubis-suffix-hook", base + kAnubisSuffixVaddr, kAnubisSuffixFp,
+                              reinterpret_cast<void*>(&mc5_anubis_set_suffix));
+    std::thread([base] { anubis_poll_loop(base); }).detach();
+    logi("anubis-diag: suffix hook %s, state poller started (50 ms, logs on change)", n ? "installed" : "NOT installed");
+    return n + 1;
+}
+
 int install_login_trace_hooks() {
     uintptr_t base = so_base("libMC5.so");
     if (base == 0) { logw("trace-hooks: libMC5.so not loaded"); return 0; }
@@ -541,6 +696,11 @@ int install_login_trace_hooks() {
 
 int install_login_error_hook() {
     logw("login-error-hook: no offset for this ABI (arm64 only)");
+    return 0;
+}
+
+int install_anubis_diag() {
+    logw("anubis-diag: no offsets for this ABI (arm64 only)");
     return 0;
 }
 

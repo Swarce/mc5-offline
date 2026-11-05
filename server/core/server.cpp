@@ -25,7 +25,7 @@ public:
     long write(const char* buf, std::size_t n) override {
         std::size_t sent = 0;
         while (sent < n) {
-            long w = ::send(fd_, buf + sent, n - sent, 0);
+            long w = ::send(fd_, buf + sent, n - sent, MSG_NOSIGNAL); // EPIPE, not SIGPIPE
             if (w <= 0) return w;
             sent += static_cast<std::size_t>(w);
         }
@@ -244,65 +244,71 @@ void Server::accept_loop() {
         ::inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
         std::string peer_str = std::string(ip) + ":" + std::to_string(ntohs(peer.sin_port));
 
-        // Multiplex the port across three protocols by peeking the first byte:
-        //   * 0x16            -> TLS ClientHello (HTTPS; all observed Gaia/telemetry
-        //                        HTTP goes through TLS here).
-        //   * an HTTP method  -> plain HTTP.
-        //   * nothing (quiet) -> the Anubis controller / TS meta-channel, which is
-        //                        server-speaks-first: the client connects and waits
-        //                        for our "create connection" greeting before sending
-        //                        anything. A short peek timeout detects this.
-        // We MSG_PEEK so the byte is left in the socket for the real reader.
-        struct timeval tv{};
-        tv.tv_sec = 0;
-        tv.tv_usec = 500 * 1000; // 500 ms: HTTPS/HTTP clients send immediately
-        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        unsigned char first = 0;
-        long pk = ::recv(fd, reinterpret_cast<char*>(&first), 1, MSG_PEEK);
-        struct timeval zero{};
-        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &zero, sizeof(zero)); // back to blocking
+        // Classify on the connection's own thread: the 500 ms peek for a quiet
+        // (server-speaks-first) socket must not stall accept() for everyone else —
+        // a controller reconnect would otherwise delay concurrent HTTPS requests.
+        int conn_id = ++conn_seq_;
+        std::thread([this, fd, peer_str, conn_id] { classify_and_serve(fd, peer_str, conn_id); }).detach();
+    }
+}
 
-        if (pk == 0) { ::close(fd); continue; } // peer closed before sending
+void Server::classify_and_serve(int fd, const std::string& peer_str, int conn_id) {
+    // Multiplex the port across three protocols by peeking the first byte:
+    //   * 0x16            -> TLS ClientHello (HTTPS; all observed Gaia/telemetry
+    //                        HTTP goes through TLS here).
+    //   * an HTTP method  -> plain HTTP.
+    //   * nothing (quiet) -> the Anubis controller / TS meta-channel, which is
+    //                        server-speaks-first: the client connects and waits
+    //                        for our "create connection" greeting before sending
+    //                        anything (0xc393e0). A short peek timeout detects this.
+    // We MSG_PEEK so the byte is left in the socket for the real reader.
+    auto t0 = std::chrono::steady_clock::now();
+    struct timeval tv{};
+    tv.tv_sec = 0;
+    tv.tv_usec = 500 * 1000; // 500 ms: HTTPS/HTTP clients send immediately
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    unsigned char first = 0;
+    long pk = ::recv(fd, reinterpret_cast<char*>(&first), 1, MSG_PEEK);
+    struct timeval zero{};
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &zero, sizeof(zero)); // back to blocking
+    long peek_ms = static_cast<long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - t0).count());
 
-        bool is_tls = (pk == 1 && first == 0x16);
-        bool quiet = (pk < 0); // timeout (no data) -> server-speaks-first meta channel
-        bool is_http = (pk == 1 && !is_tls &&
-                        (first == 'G' || first == 'P' || first == 'H' || first == 'D' ||
-                         first == 'O' || first == 'C' || first == 'T'));
-        bool is_meta = quiet || (pk == 1 && !is_tls && !is_http);
+    if (pk == 0) { ::close(fd); return; } // peer closed before sending
 
-        if (is_tls && !tls_upgrade_) {
-            logw("server: TLS ClientHello on :%d from %s — no TLS upgrade wired; dropping",
-                 cfg_.port, peer_str.c_str());
-            ::close(fd);
-            continue;
-        }
-        if (is_meta && !meta_handler_) {
-            logw("server: non-HTTP connection on :%d from %s (first=0x%02x pk=%ld) — no meta handler; dropping",
-                 cfg_.port, peer_str.c_str(), first, pk);
-            ::close(fd);
-            continue;
-        }
-        if (is_meta)
-            logi("server: meta-channel connection from %s (%s)", peer_str.c_str(),
-                 quiet ? "server-speaks-first" : "client-first");
+    bool is_tls = (pk == 1 && first == 0x16);
+    bool quiet = (pk < 0); // timeout (no data) -> server-speaks-first meta channel
+    bool is_http = (pk == 1 && !is_tls &&
+                    (first == 'G' || first == 'P' || first == 'H' || first == 'D' ||
+                     first == 'O' || first == 'C' || first == 'T'));
+    bool is_meta = quiet || (pk == 1 && !is_tls && !is_http);
 
-        // One thread per connection; Gaia keeps few concurrent connections.
-        TlsUpgrade up = is_tls ? tls_upgrade_ : TlsUpgrade{};
-        bool meta = is_meta;
-        std::thread([this, fd, peer_str, up, meta] {
-            if (up) {
-                std::unique_ptr<Conn> c = up(fd); // TLS handshake; owns fd
-                if (!c) return;                   // up() already closed fd on failure
-                serve_conn(*c, peer_str);
-            } else if (meta) {
-                FdConn c(fd);
-                meta_handler_(c, peer_str);       // Anubis/TS meta-channel; owns c
-            } else {
-                FdConn c(fd);
-                serve_conn(c, peer_str);
-            }
-        }).detach();
+    if (is_tls && !tls_upgrade_) {
+        logw("server: TLS ClientHello on :%d from %s — no TLS upgrade wired; dropping",
+             cfg_.port, peer_str.c_str());
+        ::close(fd);
+        return;
+    }
+    if (is_meta && !meta_handler_) {
+        logw("server: non-HTTP connection on :%d from %s (first=0x%02x pk=%ld) — no meta handler; dropping",
+             cfg_.port, peer_str.c_str(), first, pk);
+        ::close(fd);
+        return;
+    }
+    if (is_meta) {
+        if (quiet) logi("server: conn #%d %s -> meta (quiet after %ldms: server-speaks-first)",
+                        conn_id, peer_str.c_str(), peek_ms);
+        else       logw("server: conn #%d %s -> meta (client-first, first=0x%02x after %ldms)",
+                        conn_id, peer_str.c_str(), first, peek_ms);
+        FdConn c(fd);
+        meta_handler_(c, peer_str);       // Anubis/TS meta-channel; owns c
+    } else if (is_tls) {
+        std::unique_ptr<Conn> c = tls_upgrade_(fd); // TLS handshake; owns fd
+        if (!c) return;                             // up() already closed fd on failure
+        serve_conn(*c, peer_str);
+    } else {
+        FdConn c(fd);
+        serve_conn(c, peer_str);
     }
 }
 

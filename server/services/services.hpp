@@ -67,6 +67,21 @@ struct ServerContext {
 
     AccountStore accounts;
 
+    // Anubis / TS meta-channel progress, shared by the Federation-sessions handler
+    // (matchmaker.cpp) and the meta connection handler (meta.cpp); surfaced on
+    // /_mc5/status so a device round can be read from the phone.
+    struct AnubisStatus {
+        std::mutex mu;
+        int sessions = 0;          // Federation sessions issued (mode 0)
+        int quick_joins = 0;       // matchmaker automatch/quick_join replies (mode 1)
+        int conns = 0;             // meta connections accepted
+        std::string token, room;   // last issued encrypted_access_token / room_id
+        std::string phase;         // last meta phase reached ("A:greeted", "B:burst-sent", ...)
+        std::string mode;          // "0 (targeted)" / "1" from the connect-game nonce_type
+        long frames_in = 0, frames_out = 0, keepalives = 0;
+        std::string init_settings; // last decoded 0x01 ClientSendInitSettings
+    } anubis;
+
     // Base URL we hand out, e.g. "http://127.0.0.1:51780/".
     std::string base_url() const {
         return scheme + "://" + public_host + ":" + std::to_string(port) + "/";
@@ -89,6 +104,11 @@ void register_social(Router& router, ServerContext& ctx);      // Osiris social 
 void register_alert(Router& router, ServerContext& ctx);       // Kairos held-open SSE alert stream
 void register_message(Router& router, ServerContext& ctx);     // Hermes mailbox (array reads) + push transports
 void register_misc(Router& router, ServerContext& ctx);        // catch-all logger
+
+// Federation "sessions" (Anubis mode 0): POST <federation>/sessions/<cid>/<cred> ->
+// the controller to connect to. Exposed so the catch-all can delegate a mis-routed
+// request (one wrong answer flips the client to mode 1 for the whole process).
+Response federation_session(ServerContext& ctx, const Request& req);
 
 // The TS / Anubis meta-channel handler (non-HTTP). Wired onto the Server via
 // set_meta_handler() by the host. Conn is declared in server.hpp.

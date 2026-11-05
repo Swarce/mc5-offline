@@ -72,6 +72,8 @@ public:
 
 private:
     void accept_loop();
+    // Per-connection thread: peek the first byte (TLS / HTTP / quiet meta) and serve.
+    void classify_and_serve(int fd, const std::string& peer, int conn_id);
 
     ServerConfig cfg_;
     Router router_;
@@ -80,6 +82,7 @@ private:
     std::thread accept_thread_;
     TlsUpgrade tls_upgrade_;
     MetaHandler meta_handler_;
+    std::atomic<int> conn_seq_{0};
 };
 
 } // namespace mc5

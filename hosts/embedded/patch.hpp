@@ -57,4 +57,14 @@ int install_login_trace_hooks();
 // arm64 only. See docs/research/02 §13.
 int install_login_error_hook();
 
+// Diagnostic for the game_portal/Anubis connect (login state 8): (1) replaces the
+// 16-byte Anubis error-suffix setter leaf 0xc07fd8 with a logger (the suffix becomes
+// the login error "gl<suffix>"; caller LR names which of its call sites fired), and
+// (2) starts a read-only poller thread that logs, on change, the Anubis FSM globals,
+// the gate object's flag bytes (+0xb0..+0xb4 -> +0xEC) and the controller connection
+// state. All poller reads use process_vm_readv (no crash on a stale pointer).
+// Behaviour unchanged; fingerprint-guarded. Returns the number of parts started.
+// arm64 only. See docs/research/02 §15.
+int install_anubis_diag();
+
 } // namespace mc5

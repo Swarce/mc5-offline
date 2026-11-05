@@ -438,3 +438,80 @@ and login-wide (`online+0x254`, 180 s) timeouts; partial progress shows up as
 `gl<code>` (`glaca`, `glavct`, `glatg_<st>_<ms>_D_<b0><b3><b1><b4>`). (2) **stopgap** =
 call-site patch at `0xbce06c` `bl 0x707ec0` (`95 e7 ec 97`) → `mov w0,#1` (`20 00 80 52`),
 with game_portal kept out; reaches state 9 but delivers no profile.
+
+## 15. M1: game_portal / Anubis / TS handshake implemented (2026-11-05)
+
+The full client-derived spec is in [03-anubis-ts-spec.md](03-anubis-ts-spec.md). It was produced by a workflow of 4 RE areas, each with an adversarial verifier. Below are the claims I re-checked by hand in the disassembly, followed by what changed.
+
+**Re-checked by hand**
+- Anubis suffix setter `0xc07fd8`: a 16-byte leaf (`mov x1,x0; adrp; add #0x840; b 0x40b838`) that assigns to global `0x1bc5840`.
+- Flag setters:
+  - `0xa47d40` → `+0xb0`
+  - `0xc05850` → `+0xb1`
+  - `0x82a0d0` → `+0xb2`
+  - `0xc05860` → `+0xb4`
+  - `0xc05870` → `+0xEC`
+- TS handler `0xc09780` (jump table `0x15fa3e4`, index = type−3):
+  - `0x22` → `0xc09da4`, which sets `+0xb2` and `+0xb0`.
+  - `0x3e` → `0xc0b1a8`, which sets `+0xb3`. The payload "ERR" leads to `bhc`.
+  - `0x04` (plain) → `0xc0b180`, which reads a u8 flag and a blob32, then calls `0xc0b790` (event 2). Event 2 is then handled by the pump `0xc05e50` → `+0xb1`. So "event 2" in §14 is **TCP_Tournaments**, not a connection event.
+  - `0x4a` → `0xc0adf8`, which sets `+0x83` and calls `0xc05860` (`+0xb4`).
+  - Type 2 is below the table and goes to the default case `0xc0b5a4`, which only destroys the reader. The handler prologue (`0xc097cc`/`0xc097d0`) stores `now` into `+0x3c` for every frame, so `02 00 03` works as a no-op keepalive.
+- Frame splitter `0xbf7178` accepts types 1..0xAD with len ≠ 0.
+- Controller success check `0xc36120` reads the key `"success"`, compared against the bool or the string `"true"`, then `"reason"`.
+- online = `*(base+0x1bc62e8)`: GOT `0x1b9b0d8` holds a RELATIVE pointer to it, and `0x4e46a0`→`0x511cb8` loads it. gate = `*(online+0x1b8)` (`0x4ec770`).
+
+**Corrections to earlier sections**
+- §3/§4: the primary path is **not** `quick_join_ah`. Because eve serves `federation`, Anubis takes **mode 0**: `POST <federation>/sessions/<cid>/<cred>` (body `password`, `device_id`). The reply must carry `controller_host`, `controller_tcp_port` (a number), `encrypted_access_token` (non-empty) and `room_id`.
+  - Mode 1 is `rooms/<cid>/automatch/quick_join_ah` (`filter=ahgameserver&server_type=ts`). Its reply uses `controller_port`. Mode 1 also needs an unmapped nonce exchange.
+  - The mode flag `0x1bc586c` is process-sticky: one bad mode-0 reply flips the process to mode 1 for good.
+- The controller sends **no `login`** step. Replies need `"success":true`; `result` and `status` are ignored.
+- The server must stay silent on the socket until the client's first TS frame (0x01). Bytes sent earlier land in the controller reader's buffer and are lost, so our old immediate 0x3e/0x27 push was always dropped.
+- The TS idle watchdog is 15 s, so a keepalive is mandatory after `+0xEC` is set.
+- The 60 s Anubis budget (`online+0x250`) covers the whole chain from `0xc07020`.
+
+**Server changes**
+- `eve.cpp`: `game_portal` = `<base>game_portal` (no trailing slash).
+- `matchmaker.cpp`:
+  - New `POST sessions/{clientId}/{*credential}` handler (mode 0).
+  - The mode-1 reply now carries `controller_port` and `creator_datacenter`.
+- `misc.cpp`:
+  - The catch-all hands a mis-routed `…/sessions/…` POST that carries `device_id` to the sessions handler.
+  - It tags `sessions`/`automatch`/`nonce` misses as `ANUBIS?`.
+  - `/_mc5/status` gains an `anubis` block (phase, mode, counters, last InitSettings decode).
+- `meta.cpp` rewrite:
+  - Sends the greeting with `success`.
+  - Answers `connect game`.
+  - Decodes 0x01 and logs every field.
+  - Sends the 29-byte gate burst `22 00 03 · 3e 00 09 00000002 7b7d · 04 00 0a 00 00000002 5b5d · 4a 00 07 00000000`.
+  - Replies to `0x49` with `0x4a` and to `0x96` with `0x22`.
+  - Sends the `02 00 03` keepalive every 5 s.
+  - Never closes the socket itself.
+  - Per-connection id and ms timestamps on every line.
+  - TCP_Profile is off unless `MC5_TS_PROFILE=1`.
+- `server.cpp`:
+  - The 500 ms first-byte peek now runs on the per-connection thread, so a quiet controller socket no longer stalls `accept()`. The classification is logged with a conn id and the peek time.
+  - Writes use `MSG_NOSIGNAL`.
+- `tests/test_anubis.cpp` drives eve, both modes and the full socket sequence, checking the exact burst bytes and the keepalive.
+
+**Client diagnostics** (`install_anubis_diag`, behaviour unchanged)
+- Suffix hook on `0xc07fd8`, fingerprint-guarded. It logs `anubis-suffix: '<code>' caller=+0x…`.
+- A 50 ms read-only poller using `process_vm_readv` logs on any change:
+  - login state `0x1bc434c`;
+  - Anubis FSM `0x1bc5834`, op, idle, retry, gen, mode;
+  - gate `+0x58/+0x59/+0x94`, `+0xb0..+0xb5`, `+0xEC`, `+0x104/+0x105/+0x134`;
+  - controller `+0x2870/+0x2920/+0x29bc`.
+  It also warns once the TS has been silent for more than 8 s (game clock = `CLOCK_MONOTONIC` minus the u32 base at `0x1bbe068`, which is how `0x4e1c98` computes it).
+
+**Expected on device (happy path)**
+- Server log, in order:
+  1. federation session #1
+  2. conn #N → meta (quiet after ~500 ms)
+  3. greet
+  4. connect game (nonce_type=targeted)
+  5. first-frame 0x01 + InitSettings decode
+  6. burst
+  7. 0x49 → 0x4a
+  8. keepalives
+- Poller: anubis fsm 2→3→1→4→5→1→8→1→9→10, then b0/b3/b4 = 1, then b1 = 1, then EC=1 and 94=0. After that login moves 8→9.
+- On failure, the `anubis-suffix` line names the step. The table is in 03 §6; in `atg_…_D_wxyz` the four digits are the flags in the order b0 b3 b1 b4.
