@@ -759,3 +759,19 @@ Full reference: [04-progression.md](04-progression.md). Player-facing: [../ECONO
 **What did not work:** the player restored their online-era `files/bald` folder (index `244`, 52 assets ≈ 833 MB, `map_android_dlc_97`), but the campaign zones and MP maps still showed as fetching. The cause: BALD leaves state 1 only after a successful index GET, and we answered 404.
 
 **Fix:** the BALD local mirror. The server answers the index with the player's own index bytes after a preflight, and answers nothing else. Details are in [05-bald.md](05-bald.md). The research also showed that the old `bald.serve` path would have erased the restored folder through state 2's toc diff (`G:0x1370880`). That path is now removed, and the boot sweep deletes only individual marker files.
+
+## 22. Device round afd918a: zones push, BOTMATCH crashes in mission start (2026-11-05)
+
+**What worked:**
+- The gameplay hooks installed (`2/2 hooks; local-match sequence ok, settings getter ok, campaign getter ok`).
+- The zone walk ran: zone 0 complete, zone 1 at 0/4 story missions. The server pushed `0x45 unlocked_zones=1` at the first menu return.
+- The BALD mirror was ready (52/52).
+
+**What crashed:** BOTMATCH pushed the MultiplayerStartLocalGame state, which left the stack on the next frame. The game then started loading an MP level, and about 11 s later crashed with SIGSEGV at address 0x1c:
+- Fault: `0x799390 str w0,[x20,#0x1c]` in the mission-start record builder `0x799210` (MP branch).
+- `x20 = 0xa67b60(MP, 0x4f5b48(MP))`, the local player's slot object, was NULL.
+- Backtrace (ELF; libMC5 base 0x7500b44000): `0x799390 ← 0x5bc4f8 ← 0x82ccf4 ← 0x82d200 ← 0x83044c ← 0x4ef3bc ← 0x4f346c`.
+
+**Side effect:** the state change made the client re-login. The log shows a burst of 0x50 frames, and the age gate ran again.
+
+**Next:** the player asked for Quick Play on any mode to fill the lobby with bots for every slot. The `mc5-quickplay-bots` workflow is researching that flow, the crash and the role of the game server. Until then, do not use BOTMATCH.
