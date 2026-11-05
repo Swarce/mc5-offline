@@ -52,82 +52,129 @@ struct MapScan {
     std::vector<std::pair<std::string, std::vector<std::string>>> locations;
 };
 
-std::string attr(const std::string& tag, const char* key) {
-    std::size_t p = 0;
-    std::string k = std::string(key) + "=";
-    while ((p = tag.find(k, p)) != std::string::npos) {
-        bool boundary = p == 0 || std::isspace(static_cast<unsigned char>(tag[p - 1]));
-        std::size_t v = p + k.size();
-        if (boundary && v < tag.size() && (tag[v] == '"' || tag[v] == '\'')) {
-            char q = tag[v];
-            std::size_t e = tag.find(q, v + 1);
-            if (e == std::string::npos) return std::string();
-            std::string raw = tag.substr(v + 1, e - v - 1), out;
-            for (std::size_t i = 0; i < raw.size(); ++i) {
-                if (raw[i] != '&') { out.push_back(raw[i]); continue; }
-                static const std::pair<const char*, char> ents[] = {{"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'}, {"&apos;", '\''}};
-                bool hit = false;
-                for (const auto& en : ents)
-                    if (raw.compare(i, std::strlen(en.first), en.first) == 0) { out.push_back(en.second); i += std::strlen(en.first) - 1; hit = true; break; }
-                if (!hit) out.push_back('&');
-            }
-            return out;
-        }
-        p += k.size();
+std::string decode_entities(const std::string& raw) {
+    std::string out;
+    static const std::pair<const char*, char> ents[] = {{"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'}, {"&apos;", '\''}};
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+        if (raw[i] != '&') { out.push_back(raw[i]); continue; }
+        bool hit = false;
+        for (const auto& en : ents)
+            if (raw.compare(i, std::strlen(en.first), en.first) == 0) { out.push_back(en.second); i += std::strlen(en.first) - 1; hit = true; break; }
+        if (!hit) out.push_back('&');
     }
-    return std::string();
+    return out;
 }
 
+// Attributes of a start tag body (after the element name): name="v" / name='v' pairs,
+// tokenised in order so a 'name=' inside another attribute's value is never read.
+// Returns false on malformed syntax.
+bool attrs(const std::string& tag, std::size_t from, std::map<std::string, std::string>& out) {
+    std::size_t i = from, n = tag.size();
+    while (i < n) {
+        while (i < n && std::isspace(static_cast<unsigned char>(tag[i]))) ++i;
+        if (i >= n || tag[i] == '/') break;
+        std::size_t k = i;
+        while (i < n && tag[i] != '=' && !std::isspace(static_cast<unsigned char>(tag[i])) && tag[i] != '/') ++i;
+        std::string key = tag.substr(k, i - k);
+        while (i < n && std::isspace(static_cast<unsigned char>(tag[i]))) ++i;
+        if (key.empty() || i >= n || tag[i] != '=') return false;
+        ++i;
+        while (i < n && std::isspace(static_cast<unsigned char>(tag[i]))) ++i;
+        if (i >= n || (tag[i] != '"' && tag[i] != '\'')) return false;
+        char q = tag[i++];
+        std::size_t e = tag.find(q, i);
+        if (e == std::string::npos) return false;
+        if (!out.count(key)) out[key] = decode_entities(tag.substr(i, e - i)); // first wins, as pugixml attribute()
+        i = e + 1;
+    }
+    return true;
+}
+
+// Mirrors G:0xc62430: doc.child("dlc") -> child("mandatory") / child("locations") (the
+// FIRST element of each name, 0xbbc728), then first_child/next_sibling over ALL node
+// types (0xbbc8d8/0xbbc840). pugixml parse options 0x74 keep non-whitespace text and
+// CDATA as nodes, and each such node would become a nameless pack -> NULL handle ->
+// SIGSEGV at 0x8e1728. So: any text/CDATA inside the first <mandatory> or a location of
+// the first <locations> fails; a second <dlc>/<mandatory>/<locations> fails (ambiguous).
 MapScan scan_map(const std::string& x) {
     MapScan m;
-    std::vector<std::string> stack;
+    struct Frame { std::string el; int role; }; // role: 0 other, 1 dlc, 2 mandatory, 3 locations, 4 location
+    std::vector<Frame> st;
+    int n_dlc = 0, n_mand = 0, n_locs = 0, cur_loc = -1;
     std::size_t i = 0;
-    int cur_loc = -1;
-    while ((i = x.find('<', i)) != std::string::npos) {
-        if (x.compare(i, 4, "<!--") == 0) { std::size_t e = x.find("-->", i); if (e == std::string::npos) break; i = e + 3; continue; }
-        if (x.compare(i, 2, "<?") == 0 || x.compare(i, 2, "<!") == 0) { std::size_t e = x.find('>', i); if (e == std::string::npos) break; i = e + 1; continue; }
-        std::size_t e = x.find('>', i);
-        if (e == std::string::npos) { m.err = "unterminated tag"; return m; }
+    auto text_ok = [&](const std::string& t) {
+        for (char c : t) if (!std::isspace(static_cast<unsigned char>(c))) return false;
+        return true;
+    };
+    while (i < x.size()) {
+        std::size_t lt = x.find('<', i);
+        std::string text = x.substr(i, (lt == std::string::npos ? x.size() : lt) - i);
+        if (!text_ok(text) && !st.empty() && (st.back().role == 2 || st.back().role == 4)) {
+            m.err = "text inside <" + st.back().el + "> (the game would make a nameless pack)";
+            return m;
+        }
+        if (lt == std::string::npos) break;
+        i = lt;
+        if (x.compare(i, 4, "<!--") == 0) { std::size_t e = x.find("-->", i + 4); if (e == std::string::npos) { m.err = "unterminated comment"; return m; } i = e + 3; continue; }
+        if (x.compare(i, 9, "<![CDATA[") == 0) {
+            if (!st.empty() && (st.back().role == 2 || st.back().role == 4)) { m.err = "CDATA inside <" + st.back().el + ">"; return m; }
+            std::size_t e = x.find("]]>", i + 9);
+            if (e == std::string::npos) { m.err = "unterminated CDATA"; return m; }
+            i = e + 3;
+            continue;
+        }
+        if (x.compare(i, 2, "<?") == 0) { std::size_t e = x.find("?>", i + 2); if (e == std::string::npos) { m.err = "unterminated PI"; return m; } i = e + 2; continue; }
+        if (x.compare(i, 2, "<!") == 0) { std::size_t e = x.find('>', i); if (e == std::string::npos) { m.err = "unterminated declaration"; return m; } i = e + 1; continue; }
+        // A tag; respect quotes when looking for its end.
+        std::size_t e = i + 1;
+        char q = 0;
+        for (; e < x.size(); ++e) {
+            if (q) { if (x[e] == q) q = 0; }
+            else if (x[e] == '"' || x[e] == '\'') q = x[e];
+            else if (x[e] == '>') break;
+        }
+        if (e >= x.size()) { m.err = "unterminated tag"; return m; }
         std::string tag = x.substr(i + 1, e - i - 1);
         i = e + 1;
         if (!tag.empty() && tag[0] == '/') {
-            if (stack.empty()) { m.err = "unbalanced close tag"; return m; }
-            if (stack.size() == 3 && stack[1] == "locations") cur_loc = -1;
-            stack.pop_back();
+            if (st.empty()) { m.err = "unbalanced close tag"; return m; }
+            if (st.back().role == 4) cur_loc = -1;
+            st.pop_back();
             continue;
         }
         bool self = !tag.empty() && tag.back() == '/';
         std::size_t ne = 0;
         while (ne < tag.size() && !std::isspace(static_cast<unsigned char>(tag[ne])) && tag[ne] != '/') ++ne;
         std::string el = tag.substr(0, ne);
-        std::size_t depth = stack.size(); // depth of this element (0 = root)
-        if (depth == 0) m.root = el;
-        else if (depth == 2 && stack[1] == "mandatory") m.mandatory.push_back(attr(tag, "name"));
-        else if (depth == 2 && stack[1] == "locations") {
-            m.locations.push_back({attr(tag, "name"), {}});
+        std::map<std::string, std::string> at;
+        if (el.empty() || !attrs(tag, ne, at)) { m.err = "malformed tag <" + tag.substr(0, 40) + ">"; return m; }
+        int parent = st.empty() ? -1 : st.back().role;
+        int role = 0;
+        if (st.empty()) {
+            if (el == "dlc") { role = 1; ++n_dlc; m.root = el; }
+            else if (m.root.empty()) m.root = el;
+        } else if (parent == 1 && el == "mandatory") { role = 2; ++n_mand; }
+        else if (parent == 1 && el == "locations") { role = 3; ++n_locs; }
+        else if (parent == 2) m.mandatory.push_back(at.count("name") ? at["name"] : std::string());
+        else if (parent == 3) {
+            role = 4;
+            m.locations.push_back({at.count("name") ? at["name"] : std::string(), {}});
             cur_loc = static_cast<int>(m.locations.size()) - 1;
-        } else if (depth == 3 && stack[1] == "locations" && cur_loc >= 0) {
-            m.locations[cur_loc].second.push_back(attr(tag, "name"));
+        } else if (parent == 4 && cur_loc >= 0) {
+            m.locations[cur_loc].second.push_back(at.count("name") ? at["name"] : std::string());
         }
-        if (!self) stack.push_back(el);
-        else if (depth == 2 && stack[1] == "locations") cur_loc = -1;
+        if (!self) st.push_back({el, role});
+        else if (role == 4) cur_loc = -1;
     }
-    if (!stack.empty()) { m.err = "unclosed elements"; return m; }
-    if (m.root != "dlc") { m.err = "root is <" + m.root + ">, not <dlc>"; return m; }
+    if (!st.empty()) { m.err = "unclosed elements"; return m; }
+    if (n_dlc != 1) { m.err = n_dlc ? "more than one <dlc>" : "no <dlc> root (root is <" + m.root + ">)"; return m; }
+    if (n_mand > 1 || n_locs != 1) { m.err = "expected one <locations> and at most one <mandatory> (the game uses only the first)"; return m; }
+    m.root = "dlc";
     m.ok = true;
     return m;
 }
 
 } // namespace
-
-bool bald_is_offline_marker(const std::string& c) {
-    if (c == "<dlc/>") return true;
-    bool our_name = c.find("_map_android_dlc_1\"") != std::string::npos;
-    bool tiny = c.find("\"file_size\":6,") != std::string::npos ||
-                c.find("\"assets\":[{\"name\":\"bald_android_") != std::string::npos;
-    return c.size() <= 4096 && our_name && tiny && c.find("_dlc_gla2_") == std::string::npos &&
-           c.find("_mp_") == std::string::npos;
-}
 
 void BaldMirror::set_dirs(std::vector<std::string> dirs) {
     std::lock_guard<std::mutex> g(mu_);
@@ -153,12 +200,19 @@ BaldPreflight BaldMirror::preflight(const std::string& n, bool require_sizes) {
 
 BaldPreflight BaldMirror::run(const std::vector<std::string>& dirs, const std::string& n, bool require_sizes) {
     BaldPreflight p;
+    std::vector<std::string> found;
+    std::set<std::pair<unsigned long long, unsigned long long>> inodes;
     for (std::string d : dirs) {
         if (d.empty()) continue;
         if (d.back() != '/') d.push_back('/');
-        long long sz;
-        if (file_size(d + "bald___index___.txt", sz)) { p.dir = d; break; }
+        struct stat st;
+        if (::stat((d + "bald___index___.txt").c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        struct stat ds;
+        if (::stat(d.c_str(), &ds) != 0) continue;
+        if (!inodes.insert({static_cast<unsigned long long>(ds.st_dev), static_cast<unsigned long long>(ds.st_ino)}).second) continue;
+        found.push_back(d);
     }
+    if (!found.empty()) p.dir = found[0];
     auto fail = [&](const std::string& s) { p.fails.push_back(s); };
     if (p.dir.empty()) {
         std::string list;
@@ -167,6 +221,17 @@ BaldPreflight BaldMirror::run(const std::vector<std::string>& dirs, const std::s
         return p;
     }
     const std::string D = p.dir;
+    // Two distinct folders with an index: BALD reads only one of them (its base is
+    // resolved inside libMC5), so accept only if their bookkeeping is byte-identical.
+    for (std::size_t k = 1; k < found.size(); ++k) {
+        for (const char* f : {"bald___index___.txt", "bald___version___.txt", "bald___toc___.txt", "bald___hashes___.txt"}) {
+            std::string a1, a2;
+            store::read_file(D + f, a1);
+            store::read_file(found[k] + f, a2);
+            if (a1 != a2) { fail(std::string("two different DLC folders (") + D + ", " + found[k] + ") differ in " + f); return p; }
+        }
+        p.notes.push_back("also found an identical folder " + found[k]);
+    }
     std::string ver, idx, toc_s, hash_s;
     // H1 version
     if (!store::read_file(D + "bald___version___.txt", ver)) fail("H1 bald___version___.txt unreadable");
@@ -175,9 +240,12 @@ BaldPreflight BaldMirror::run(const std::vector<std::string>& dirs, const std::s
     if (!store::read_file(D + "bald___index___.txt", idx) || idx.empty() || idx.size() > 64)
         fail("H2 bald___index___.txt empty or too large");
     else {
-        bool clean = idx.compare(0, 3, "\xEF\xBB\xBF") != 0;
-        for (char c : idx) if (c == '\r' || c == '\n' || c == ' ' || c == '\t' || c == '\0') clean = false;
-        if (!clean) fail("H2 bald___index___.txt contains whitespace/BOM (BALD compares it byte for byte)");
+        // BALD byte-compares it, and builds the toc name from it, so allow only a safe
+        // charset (no whitespace/BOM, and nothing that could split a URL path).
+        bool clean = true;
+        for (char c : idx)
+            if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-')) clean = false;
+        if (!clean) fail("H2 bald___index___.txt has characters other than [0-9A-Za-z._-] (BALD compares it byte for byte)");
         p.index_bytes = idx;
     }
     // H3 toc
@@ -223,7 +291,9 @@ BaldPreflight BaldMirror::run(const std::vector<std::string>& dirs, const std::s
         if (k.empty()) { fail("H6 unparseable asset name " + nm); break; }
         if (k == "map_android_dlc" && nm.size() >= 2 && nm.compare(nm.size() - 2, 2, "_1") == 0)
             { fail("H7 toc names the old offline map " + nm); break; }
-        keys.insert(k);
+        // The game resolves a key to the FIRST toc entry (G:0x136e010); two entries with
+        // one key would mean we validate a different file than the one it mounts.
+        if (!keys.insert(k).second) { fail("H5 duplicate toc key '" + k + "' (" + key_to_name[k] + ", " + nm + ")"); break; }
         key_to_name[k] = nm;
     }
     if (!p.fails.empty()) return p;
@@ -239,11 +309,14 @@ BaldPreflight BaldMirror::run(const std::vector<std::string>& dirs, const std::s
         } else {
             missing.push_back(nm);
             p.bytes_missing += want;
-            long long t;
-            if (file_size(D + "temp_" + nm, t)) p.notes.push_back("S2 partial temp_" + nm + " present (BALD would try to resume it)");
         }
+        long long t;
+        if (file_size(D + "temp_" + nm, t))
+            fail("H11 a partial download temp_" + nm + " is in the folder (a ready BALD would resume and rewrite it); move it out");
     }
-    for (const auto& m : missing) p.notes.push_back("S1 missing " + m + " (its zone stays 'not downloaded')");
+    // H12: every toc asset must be present. With any missing, a ready BALD queues it
+    // (z0_mp packs automatically) and writes temp_ files into the player's folder.
+    for (const auto& m : missing) fail("H12 missing " + m + " (restore it from your backup)");
     // H8 map entry + file
     auto mk = key_to_name.find("map_android_dlc");
     if (mk == key_to_name.end()) { fail("H8 toc has no map_android_dlc entry"); return p; }

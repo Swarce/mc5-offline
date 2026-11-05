@@ -14,6 +14,8 @@
 //
 // Toc requests are never answered (state 2 is the deleting path). Asset payload
 // requests are never answered either (a mismatched body is deleted after post-check).
+// The preflight also requires EVERY toc asset to be present and no temp_ partials, so a
+// ready BALD has nothing to download and never writes into the folder.
 // C++17.
 #pragma once
 
@@ -49,10 +51,5 @@ private:
     std::vector<std::string> dirs_;
     std::map<std::string, BaldPreflight> cache_;
 };
-
-// True if a small file's content is something an earlier offline build wrote into
-// <files>/bald (the empty "<dlc/>" map, or a toc/hashes naming only
-// "..._map_android_dlc_1"). Used by the boot sweep, which deletes only such files.
-bool bald_is_offline_marker(const std::string& content);
 
 } // namespace mc5

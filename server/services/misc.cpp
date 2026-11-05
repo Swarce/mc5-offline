@@ -92,6 +92,18 @@ void register_misc(Router& router, ServerContext& ctx) {
             logw("anubis: WARN federation sessions via fallback (%s) — route did not match", req.path.c_str());
             return federation_session(ctx, req);
         }
+        // Never answer a DLC-manager (BALD) path with 200: a 200 body for a toc or payload
+        // is what makes BALD rewrite or erase the player's DLC folder (research/05).
+        {
+            std::size_t sl = req.path.rfind('/');
+            std::string last = sl == std::string::npos ? req.path : req.path.substr(sl + 1);
+            if (last.compare(0, 5, "bald_") == 0 || req.path.find("/bald_") != std::string::npos) {
+                logw("asset: BALD-shaped path reached the fallback (%s) -> 404", req.path.c_str());
+                Response r = Response::json("", 404);
+                r.content_type = "text/plain";
+                return r;
+            }
+        }
         const char* tag = (sessionsish || req.path.find("automatch") != std::string::npos ||
                            req.path.find("nonce") != std::string::npos) ? "ANUBIS? " : "";
         std::string hdrs;

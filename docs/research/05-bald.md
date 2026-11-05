@@ -21,8 +21,23 @@ area adversarially verified. **§0 says what is implemented**; the spec that fol
   builds. It never deletes a directory or any other file.
 * Crash guard "bald": armed on each served index, confirmed after 60 s alive; two unconfirmed launches switch the
   mirror off.
-* Not implemented (by design): serving payload ranges, md5 verification, an import directory. A missing asset leaves
-  its zone "not downloaded"; the preflight logs which file is missing.
+* **Review hardening** (wf `mc5-bald-mirror-review`, each finding adversarially verified):
+  * **H11 / H12:** every toc asset must be present, and no `temp_<name>` may exist. With any asset missing, a ready
+    BALD queues it (the z0_mp packs automatically), and its worker then creates, extends, truncates or renames
+    `temp_` files in the folder. With the full set present, it has nothing to do.
+  * **The map scanner follows pugixml exactly** (`G:0xc62430`: `child("dlc")` → the first `child("mandatory")` /
+    `child("locations")`, then `first_child` / `next_sibling` over every node type). These all fail:
+    * text or CDATA inside `<mandatory>` or a location, which would become a nameless pack and crash at `0x8e1728`;
+    * more than one `<dlc>`, `<mandatory>` or `<locations>`.
+    Attributes are tokenised in order, so a `name=` hidden inside another attribute's value cannot be read as the name.
+  * **Duplicate toc keys fail.** The game mounts the first entry for a key (`G:0x136e010`).
+  * **The index bytes must match `[0-9A-Za-z._-]`.** The toc name is built from them.
+  * **Folders:** candidate folders are deduplicated by inode. Two distinct folders that both hold an index must have
+    byte-identical bookkeeping files.
+  * **The router fallback 404s any BALD-shaped path,** so it can never answer `200 {}`.
+  * **The cache sweep never enters `bald/`.**
+  * **A pre-v3 `guards.bald`** (from the empty-map crash) is reset by the v3 migration.
+* Not implemented (by design): serving payload ranges, md5 verification, an import directory.
 * Verified offline against the player's real `bald___{index,version,toc,hashes}___.txt` with sparse payload files:
   52/52 assets and 5 locations pass. The map file itself (3,018 B) was not available, so H9 runs for the first time
   on the device. If it fails, the log prints the map's tag structure and the safe 404 stays.

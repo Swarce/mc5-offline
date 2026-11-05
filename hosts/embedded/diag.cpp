@@ -418,6 +418,7 @@ void rm_caches_in(const std::string& dir, int depth, int& budget) {
             continue;
         }
         if (depth > 0) {
+            if (n == "bald") continue; // the player's DLC folder: never swept (research/05)
             if (n.rfind("data_", 0) == 0 || n.find("HighSlow") != std::string::npos ||
                 n.find("pack") != std::string::npos || n.find("obb") != std::string::npos ||
                 n.find("assets") != std::string::npos)

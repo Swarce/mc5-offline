@@ -244,6 +244,7 @@ void Progress::load_locked() {
     model_ = Json::object();
     state_ = Json::object();
     have_profile_file_ = false;
+    bald_guard_reset_ = false;
     if (!dir_.empty()) {
         Json user;
         bool found = false;
@@ -257,6 +258,7 @@ void Progress::load_locked() {
             if (assets["coupons"].is_object()) settings_["redeem"]["codes"] = assets["coupons"];
             merge_into(settings_, user);
             if (migrate) {
+                bald_guard_reset_ = ver < 3;
                 settings_["settingsVersion"] = kSettingsVersion;
                 store::save_atomic(dir_ + "/settings.json", settings_.dump());
                 logi("[progress] settings.json migrated v%lld -> v%lld (bald.mode now '%s')", ver, kSettingsVersion,
@@ -268,6 +270,12 @@ void Progress::load_locked() {
         }
         have_profile_file_ = store::load_json(dir_ + "/profile.json", model_);
         store::load_json(dir_ + "/state.json", state_);
+        // A "bald" crash guard recorded by a pre-v3 build belonged to the old empty-map
+        // reply (it crashed the menu), not to the mirror; start the mirror's guard fresh.
+        if (bald_guard_reset_ && state_["guards"].is_object() && state_["guards"].erase("bald")) {
+            logi("[guard] 'bald' reset (it was recorded by an older build's DLC reply)");
+            dirty_ = true;
+        }
         Json items;
         if (store::load_json(dir_ + "/items.json", items)) {
             ItemUniverse u;

@@ -146,6 +146,7 @@ private:
     Json model_ = Json::object();
     Json state_ = Json::object();
     bool have_profile_file_ = false;
+    bool bald_guard_reset_ = false; // settings migrated from < v3 (see load_locked)
     bool dirty_ = false;
     std::chrono::steady_clock::time_point last_save_{};
     // session (not persisted)

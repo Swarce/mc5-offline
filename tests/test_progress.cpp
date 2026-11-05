@@ -348,6 +348,17 @@ int main() {
         Json disk;
         CHECK(mc5::store::load_json(d3 + "/settings.json", disk));
         CHECK_EQ(disk["settingsVersion"].as_int(), 3);
+        {   // a pre-v3 'bald' guard is reset by the migration
+            CHECK(mc5::store::save_atomic(d3 + "/settings.json", "{\"settingsVersion\":2}"));
+            CHECK(mc5::store::save_atomic(d3 + "/state.json", "{\"guards\":{\"bald\":{\"disabled\":true,\"fails\":2},\"profile\":{\"fails\":1}}}"));
+            mc5::Progress pg;
+            pg.open(d3);
+            CHECK(pg.guard_allowed("bald"));
+            Json st;
+            CHECK(mc5::store::load_json(d3 + "/state.json", st));
+            CHECK(!st["guards"].contains("bald"));
+            CHECK(st["guards"].contains("profile"));
+        }
         // A v3 file keeps an explicit choice.
         CHECK(mc5::store::save_atomic(d3 + "/settings.json", "{\"settingsVersion\":3,\"bald\":{\"mode\":\"off\"}}"));
         mc5::Progress p2;
@@ -411,11 +422,16 @@ int main() {
         CHECK_EQ(ok.present, std::size_t(5));
         CHECK_EQ(ok.locations.size(), std::size_t(2));
 
-        // A missing zone file is soft: still ready, the zone just stays not downloaded.
+        // A missing asset is a hard gate: a ready BALD would queue it and write temp_ files.
         ::unlink((B + "/" + pre + "z3_venice_gla2_2").c_str());
-        mc5::BaldPreflight soft = run();
-        CHECK(soft.ok);
-        CHECK_EQ(soft.present, std::size_t(4));
+        CHECK(!run().ok);                                   // H12
+        write_all("244", "6.0.12a", true);
+        CHECK(mc5::store::save_atomic(B + "/temp_" + pre + "z0_mp_gla2_7", "MM"));
+        CHECK(!run().ok);                                   // H11 partial download present
+        ::unlink((B + "/temp_" + pre + "z0_mp_gla2_7").c_str());
+        CHECK(run().ok);
+        write_all("24/4", "6.0.12a", true);
+        CHECK(!run().ok);                                   // H2 charset
 
         // Hard gates (each would mean a state-2 re-download/erase or a wrapper crash).
         write_all("244\n", "6.0.12a", true);
@@ -441,9 +457,42 @@ int main() {
         assets.back().body = "<dlc/>";
         write_all("244", "6.0.12a", true);
         CHECK(!run().ok);                                   // H7/H9 old empty map
+        // pugixml semantics (review): text/CDATA inside a pack list, a second <locations>,
+        // and 'name=' hidden inside another attribute all fail.
+        auto with_map = [&](const std::string& m2) { assets.back().body = m2; write_all("244", "6.0.12a", true); return run(); };
+        std::string t1 = mapx; t1.replace(t1.find("</mandatory>"), 0, "junk");
+        CHECK(!with_map(t1).ok);
+        std::string t2 = mapx; t2.replace(t2.find("<p name=\"z0_mp_lvl\""), 0, "<![CDATA[a]]>");
+        CHECK(!with_map(t2).ok);
+        std::string t3 = mapx; t3.replace(t3.find("</dlc>"), 0, "<locations><loc name=\"z2\"/></locations>");
+        CHECK(!with_map(t3).ok);
+        std::string t4 = mapx; t4.replace(t4.find("<loc name=\"z0_mp\">"), 18, "<loc title='name=\"z0_mp\"' name=\"zz\">");
+        CHECK(!with_map(t4).ok);
+        std::string t5 = "<!-- comment --><dlc>\n  " + mapx.substr(mapx.find("<mandatory>"));
+        CHECK(with_map(t5).ok);                             // comments and whitespace are fine
         assets.back().body = mapx;
         write_all("244", "6.0.12a", true);
         CHECK(run().ok);
+        // Duplicate toc key (the game would mount the first, we checked the last).
+        assets.insert(assets.begin(), {pre + "z0_mp_gla2_6", "OLD"});
+        write_all("244", "6.0.12a", true);
+        CHECK(!run().ok);
+        assets.erase(assets.begin());
+        ::unlink((B + "/" + pre + "z0_mp_gla2_6").c_str());
+        write_all("244", "6.0.12a", true);
+        CHECK(run().ok);
+        // Two distinct folders: only accepted when their bookkeeping is identical.
+        {
+            const std::string B2 = root + "/bald2";
+            CHECK(mc5::store::mkdirs(B2));
+            for (const char* f : {"bald___index___.txt", "bald___version___.txt", "bald___toc___.txt", "bald___hashes___.txt"}) {
+                std::string c; mc5::store::read_file(B + "/" + f, c); CHECK(mc5::store::save_atomic(B2 + "/" + f, c));
+            }
+            CHECK(mc5::BaldMirror::run({B, B2}, "android_astc_h", true).ok);
+            CHECK(mc5::store::save_atomic(B2 + "/bald___index___.txt", "245"));
+            CHECK(!mc5::BaldMirror::run({B, B2}, "android_astc_h", true).ok);
+            CHECK(mc5::BaldMirror::run({B, B + "/"}, "android_astc_h", true).ok); // same folder twice: deduped
+        }
 
         // Through the router: index -> 200 exact bytes; toc and payloads -> 404, always.
         mc5::Router router;
@@ -481,6 +530,7 @@ int main() {
         CHECK_EQ(get(P + "bald_android_astc_h_map_android_dlc_97", "bytes=0-5").status, 404);
         CHECK(snapshot() == before);
         CHECK_EQ(get(P + "GameOptions", "").status, 404);
+        CHECK_EQ(get("/somewhere/else/bald_android_astc_h__toc_244", "").status, 404); // fallback never 200s BALD
         CHECK(get("/_mc5/status", "").body.find("\"progress\"") != std::string::npos);
         // mode "off": 404 even with a good folder.
         CHECK(mc5::store::save_atomic(sd + "/settings.json", "{\"settingsVersion\":3,\"bald\":{\"mode\":\"off\",\"holdMs\":0}}"));

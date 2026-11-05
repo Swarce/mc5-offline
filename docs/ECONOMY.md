@@ -203,5 +203,8 @@ At startup the server checks the folder and logs the result (`[bald] MIRROR READ
 * every file has the right size;
 * the DLC map has an MP location `z0_mp`, and every pack it names is in the toc.
 
+* every asset the toc lists is present, and no partial `temp_…` download file is left in the folder.
+
 If any check fails, the DLC stays "not downloaded", as before. Nothing is changed, and the log says which file to fix.
-A missing zone file is not an error: that zone alone stays "not downloaded".
+The mirror only switches on when the whole set is complete. With a file missing, the game would try to download it
+and write partial files into your folder.
