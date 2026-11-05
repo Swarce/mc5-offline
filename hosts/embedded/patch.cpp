@@ -281,6 +281,7 @@ constexpr uintptr_t kAnIdleVaddr     = 0x1bc583c;
 constexpr uintptr_t kAnRetryVaddr    = 0x1bc585c;
 constexpr uintptr_t kAnGenVaddr      = 0x1bc5860;
 constexpr uintptr_t kAnModeVaddr     = 0x1bc586c;
+constexpr uintptr_t kAgeStateVaddr   = 0x1bc07a0; // age FSM 0x8ded40 state (read at 0x8ded78)
 
 template <typename T>
 bool safe_read(uintptr_t addr, T& out) {
@@ -296,6 +297,7 @@ struct AnubisSnap {
     int f58 = -1, f59 = -1, f94 = -1, b0 = -1, b1 = -1, b2 = -1, b3 = -1, b4 = -1, b5 = -1;
     int ec = -1, f104 = -1, f105 = -1, f134 = -1;
     int cc_state = -1, cc_2920 = -1, cc_reason = -1;
+    int age_state = -1, restr_done = -1, restr_cached = -1;
     bool operator!=(const AnubisSnap& o) const { return std::memcmp(this, &o, sizeof(*this)) != 0; }
 };
 
@@ -316,7 +318,17 @@ void anubis_poll_loop(uintptr_t base) {
         s.gen = rd32(base + kAnGenVaddr);
         s.mode = rd8(base + kAnModeVaddr);
         uintptr_t online = 0, gate = 0, lobby = 0, cc = 0;
-        if (safe_read(base + kOnlinePtrVaddr, online) && online && safe_read(online + 0x1b8, gate) && gate) {
+        // First-run age gate (§17): g_age_state 1 = waiting for the age/gender answer,
+        // 10/11 = done (game state 0x26 -> 0x2b, the tutorial). online+0x110 = the
+        // Restrictions answer arrived; online+0x118/+0x120 = cached restriction ids.
+        s.age_state = rd32(base + kAgeStateVaddr);
+        if (safe_read(base + kOnlinePtrVaddr, online) && online) {
+            s.restr_done = rd8(online + 0x110);
+            uintptr_t vb = 0, ve = 0;
+            if (safe_read(online + 0x118, vb) && safe_read(online + 0x120, ve))
+                s.restr_cached = (ve >= vb && ve - vb < 0x1000) ? static_cast<int>((ve - vb) / 4) : -2;
+        }
+        if (online && safe_read(online + 0x1b8, gate) && gate) {
             s.f58 = rd8(gate + 0x58);   s.f59 = rd8(gate + 0x59);  s.f94 = rd32(gate + 0x94);
             s.b0 = rd8(gate + 0xb0);    s.b1 = rd8(gate + 0xb1);   s.b2 = rd8(gate + 0xb2);
             s.b3 = rd8(gate + 0xb3);    s.b4 = rd8(gate + 0xb4);   s.b5 = rd8(gate + 0xb5);
@@ -345,10 +357,10 @@ void anubis_poll_loop(uintptr_t base) {
         if (!have_last || s != last) {
             logi("anubis-poll: login=%d | anubis fsm=%d op=%d idle=%d retry=%d gen=%d mode=%d | "
                  "gate 58=%d 59=%d 94=%d b0=%d b1=%d b2=%d b3=%d b4=%d b5=%d EC=%d 104=%d 105=%d 134=%d | "
-                 "cc state=%d 2920=%d reason=%d",
+                 "cc state=%d 2920=%d reason=%d | age_state=%d restr_done=%d restr_cached=%d",
                  s.login, s.fsm, s.op, s.idle, s.retry, s.gen, s.mode,
                  s.f58, s.f59, s.f94, s.b0, s.b1, s.b2, s.b3, s.b4, s.b5, s.ec, s.f104, s.f105, s.f134,
-                 s.cc_state, s.cc_2920, s.cc_reason);
+                 s.cc_state, s.cc_2920, s.cc_reason, s.age_state, s.restr_done, s.restr_cached);
             last = s;
             have_last = true;
         }
@@ -506,6 +518,116 @@ int install_trace_hook(const char* label, uintptr_t vaddr, void* logger) {
     return 1;
 }
 
+// ---- First-run age gate diagnostics (docs/research/02 §17) ----------------------
+// The pre-tutorial "connection error" was the "ageLimit" notification popup: the age
+// screen's Restrictions check (local, no HTTP) failed with 0x1c because compliancy.json
+// had no <GameType> section. These hooks log every step of that chain so one device
+// run shows whether the fix took and, if not, which step fails. Logging only; each
+// site's first 16 bytes are compared to the shipped 6.0.12a bytes before patching.
+
+// Bounded, crash-proof C-string read (process_vm_readv); non-printables become '.'.
+std::string safe_cstr(unsigned long long addr, std::size_t max = 120) {
+    if (addr < 0x1000) return addr ? "<bad>" : "<null>";
+    std::string out;
+    char buf[16];
+    while (out.size() < max) {
+        iovec local{buf, sizeof(buf)};
+        iovec remote{reinterpret_cast<void*>(addr + out.size()), sizeof(buf)};
+        if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != static_cast<ssize_t>(sizeof(buf)))
+            return out.empty() ? "<unreadable>" : out + "<unreadable>";
+        for (char ch : buf) {
+            if (ch == '\0') return out;
+            out.push_back((ch >= 0x20 && ch < 0x7f) ? ch : '.');
+            if (out.size() >= max) break;
+        }
+    }
+    return out + "..";
+}
+
+unsigned long long lr_off(unsigned long long lr) {
+    return (g_mc5_base && lr >= g_mc5_base) ? (lr - g_mc5_base) : lr;
+}
+
+// H1 0x8de9e8 age-gate callback (ok, age, connFail). ok=0 -> the ageLimit popup next
+// frame (1733 "Failed to connect!" when connFail=1, else 4843-style age refusal).
+extern "C" void mc5_trace_age_cb(const char*, unsigned long long ok, unsigned long long age,
+                                 unsigned long long conn_fail, unsigned long long lr) {
+    unsigned o = static_cast<unsigned>(ok & 0xff), cf = static_cast<unsigned>(conn_fail & 0xff);
+    if (o) logi("age-gate: callback ok=1 age=%u connFail=%u lr=+0x%llx -> PASSED (tutorial next)",
+                static_cast<unsigned>(age), cf, lr_off(lr));
+    else   logw("age-gate: callback ok=0 age=%u connFail=%u lr=+0x%llx -> 'ageLimit' popup (%s)",
+                static_cast<unsigned>(age), cf, lr_off(lr), cf ? "1733 Failed to connect!" : "age refusal");
+}
+
+// H2 0xc1c6c0 Restrictions completion (result, const std::vector<int>* ids).
+extern "C" void mc5_trace_restr_done(const char*, unsigned long long result, unsigned long long vec,
+                                     unsigned long long, unsigned long long lr) {
+    std::string ids;
+    int n = -1;
+    uintptr_t b = 0, e = 0;
+    if (safe_read(vec, b) && safe_read(vec + 8, e) && e >= b && e - b < 0x400) {
+        n = static_cast<int>((e - b) / 4);
+        for (int i = 0; i < n && i < 16; ++i) {
+            int id = rd32(b + 4 * static_cast<uintptr_t>(i));
+            char t[16];
+            std::snprintf(t, sizeof(t), "%s0x%x", i ? "," : "", static_cast<unsigned>(id));
+            ids += t;
+        }
+    }
+    unsigned r = static_cast<unsigned>(result);
+    if (r == 0 && n == 0) logi("age-gate: restrictions result=0 ids=[] lr=+0x%llx -> OK", lr_off(lr));
+    else logw("age-gate: restrictions result=0x%x n=%d ids=[%s] lr=+0x%llx%s", r, n, ids.c_str(), lr_off(lr),
+              r == 0x1c ? " (0x1c: empty/invalid restriction map — compliancy <GameType> section missing?)" : "");
+}
+
+// H3 0x13a2268 "Sending callback to game...result:" (result in w2).
+extern "C" void mc5_trace_restr_cb(const char*, unsigned long long, unsigned long long,
+                                   unsigned long long result, unsigned long long lr) {
+    logi("age-gate: Restrictions 'Sending callback to game' result=0x%x lr=+0x%llx",
+         static_cast<unsigned>(result), lr_off(lr));
+}
+
+// H4 0x901c18 native notification popup (message, tag, title): names every popup
+// (ageLimit, loginMMError, mandatoryStateError, popupODRFailed, ...).
+extern "C" void mc5_trace_popup(const char*, unsigned long long msg, unsigned long long tag,
+                                unsigned long long title, unsigned long long lr) {
+    logw("popup: tag='%s' title='%s' msg='%s' lr=+0x%llx", safe_cstr(tag, 48).c_str(),
+         title ? safe_cstr(title, 64).c_str() : "", safe_cstr(msg).c_str(), lr_off(lr));
+}
+
+// H5 0xaa9ad0 popup_Connect (x1, x2): argument types not fully resolved — logged as
+// raw pointers plus a best-effort C-string read.
+extern "C" void mc5_trace_popup_connect(const char*, unsigned long long x0, unsigned long long x1,
+                                        unsigned long long x2, unsigned long long lr) {
+    logw("popup-connect: x0=0x%llx x1=0x%llx('%s') x2=0x%llx('%s') lr=+0x%llx", x0, x1,
+         safe_cstr(x1, 64).c_str(), x2, safe_cstr(x2, 64).c_str(), lr_off(lr));
+}
+
+// H6 0x13cfc68 RequestRestrictions / H7 0xc1c4e0 age submit: (this, age, gender).
+extern "C" void mc5_trace_age_req(const char* label, unsigned long long, unsigned long long age,
+                                  unsigned long long gender, unsigned long long lr) {
+    logi("age-gate: %s age=%u gender=%u lr=+0x%llx", label, static_cast<unsigned>(age),
+         static_cast<unsigned>(gender), lr_off(lr));
+}
+
+// install_trace_hook with an exact 16-byte fingerprint check first.
+int install_trace_hook_fp(const char* label, uintptr_t vaddr, const unsigned char (&fp)[16], void* logger) {
+    void* site = reinterpret_cast<void*>(vaddr);
+    if (std::memcmp(site, fp, 16) != 0) {
+        logw("trace-hook %s: fingerprint mismatch at %p (got %s) — refusing", label, site,
+             hexpre(reinterpret_cast<unsigned char*>(site), 16).c_str());
+        return 0;
+    }
+    return install_trace_hook(label, vaddr, logger);
+}
+
+struct AgeHookSpec {
+    const char* label;
+    uintptr_t vaddr;
+    unsigned char fp[16];
+    void* logger;
+};
+
 } // namespace
 
 int apply_libmc5_http_patches(int http_port) {
@@ -609,6 +731,34 @@ int install_anubis_diag() {
     return n + 1;
 }
 
+int install_age_gate_diag() {
+    uintptr_t base = so_base("libMC5.so");
+    if (base == 0) { logw("age-gate-diag: libMC5.so not loaded"); return 0; }
+    g_mc5_base = base;
+    // Prologues read from the shipped 6.0.12a libMC5.so (all pass reloc_safe).
+    const AgeHookSpec hooks[] = {
+        {"AgeCallback", 0x8de9e8, {0xfc, 0x5f, 0xbc, 0xa9, 0xf6, 0x57, 0x01, 0xa9, 0xf4, 0x4f, 0x02, 0xa9, 0xfd, 0x7b, 0x03, 0xa9},
+         reinterpret_cast<void*>(&mc5_trace_age_cb)},
+        {"RestrictionsDone", 0xc1c6c0, {0xff, 0x03, 0x01, 0xd1, 0xf5, 0x0b, 0x00, 0xf9, 0xf4, 0x4f, 0x02, 0xa9, 0xfd, 0x7b, 0x03, 0xa9},
+         reinterpret_cast<void*>(&mc5_trace_restr_done)},
+        {"RestrictionsSendCb", 0x13a2268, {0xfc, 0x6f, 0xba, 0xa9, 0xfa, 0x67, 0x01, 0xa9, 0xf8, 0x5f, 0x02, 0xa9, 0xf6, 0x57, 0x03, 0xa9},
+         reinterpret_cast<void*>(&mc5_trace_restr_cb)},
+        {"PopupNotification", 0x901c18, {0xff, 0x83, 0x04, 0xd1, 0xfc, 0x67, 0x0d, 0xa9, 0xf8, 0x5f, 0x0e, 0xa9, 0xf6, 0x57, 0x0f, 0xa9},
+         reinterpret_cast<void*>(&mc5_trace_popup)},
+        {"PopupConnect", 0xaa9ad0, {0xff, 0x03, 0x04, 0xd1, 0xfb, 0x53, 0x00, 0xf9, 0xfa, 0x67, 0x0b, 0xa9, 0xf8, 0x5f, 0x0c, 0xa9},
+         reinterpret_cast<void*>(&mc5_trace_popup_connect)},
+        {"RequestRestrictions", 0x13cfc68, {0xfc, 0x6f, 0xba, 0xa9, 0xfa, 0x67, 0x01, 0xa9, 0xf8, 0x5f, 0x02, 0xa9, 0xf6, 0x57, 0x03, 0xa9},
+         reinterpret_cast<void*>(&mc5_trace_age_req)},
+        {"AgeSubmit", 0xc1c4e0, {0xff, 0x03, 0x03, 0xd1, 0xf7, 0x43, 0x00, 0xf9, 0xf6, 0x57, 0x09, 0xa9, 0xf4, 0x4f, 0x0a, 0xa9},
+         reinterpret_cast<void*>(&mc5_trace_age_req)},
+    };
+    int n = 0;
+    for (const auto& h : hooks) n += install_trace_hook_fp(h.label, base + h.vaddr, h.fp, h.logger);
+    logi("age-gate-diag: %d/%zu hooks installed (age gate / restrictions / popups)", n,
+         sizeof(hooks) / sizeof(hooks[0]));
+    return n;
+}
+
 int install_login_trace_hooks() {
     uintptr_t base = so_base("libMC5.so");
     if (base == 0) { logw("trace-hooks: libMC5.so not loaded"); return 0; }
@@ -701,6 +851,11 @@ int install_login_error_hook() {
 
 int install_anubis_diag() {
     logw("anubis-diag: no offsets for this ABI (arm64 only)");
+    return 0;
+}
+
+int install_age_gate_diag() {
+    logw("age-gate-diag: no offsets for this ABI (arm64 only)");
     return 0;
 }
 

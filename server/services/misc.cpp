@@ -5,6 +5,8 @@
 // 403/404: on Gaia a 403 is treated as upgrade-required or wipes the profile, and
 // a 404 aborts the request. Unknown endpoints therefore get a 200 with an empty
 // JSON object (refined per-endpoint as the device log shows their real shape).
+// Exception: the asset service answers 404 for absent assets on purpose (asset.cpp;
+// the asset processor treats 404 as a clean "absent", verified in §17).
 
 #include "services.hpp"
 
@@ -22,6 +24,16 @@ std::time_t g_start = std::time(nullptr);
 void register_core(Router& router, ServerContext& ctx) {
     // eve probes GET / to see if the environment is up.
     router.add("GET", "", [](const Request&) { return Response::json("{}"); });
+
+    // Storage consent (SetConsent 0x4f74e0 -> 0xc19878), sent each time the player
+    // accepts the privacy notice: form consent={"explicit":B,"parental":B,"standard":B}
+    // &operation=set. Its callback 0xc19810 ignores every result except 0x9d5, so 200
+    // "{}" is all it needs (not 204: the Gaia processor counts only 200/201/202/206).
+    router.add("POST", "profiles/{who}/myprofile/consent", [](const Request& r) {
+        logi("storage: consent %s operation='%s' consent='%s' -> 200 {}", r.param("who").c_str(),
+             r.value("operation").c_str(), r.value("consent").c_str());
+        return Response::json("{}");
+    });
 
     router.add("GET", "_mc5/status", [&ctx](const Request&) {
         Json o = Json::object();

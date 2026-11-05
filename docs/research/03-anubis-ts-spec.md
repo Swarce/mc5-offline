@@ -177,6 +177,18 @@ Optional, off by default for the first device test: a TCP_Profile.
 
 **Never send:** `0x3a`; `0x0d` or `0x3c` with non-null JSON; `0x33`; `0x20`; a 0x3e/0x3f whose payload is exactly `ERR`.
 
+**Client frames after login** (02-post-auth-chain §17). Every one is fire-and-forget, so log it and send no reply:
+
+| Frame | Sender | Meaning |
+|---|---|---|
+| `50 00 0b 00000002 0000 0000` | login FSM state 9 via `0xb840e0` | credential report; the optional ack `1f 00 03` has no effect |
+| `0b <len> <str>` | online Update `0xc184f8`, one-shot | public info `{"display_name":..}` plus clan_* fields |
+| `34 00 03` | `0xc184f8`; events timer `0x7b0da0` | tournaments refresh; the data arrives as 0x04/0x28 |
+| `52 00 03` | OnResume `0x4f1f30` → `0xc1ad08` | app resumed |
+| `ad <str> <str> <str>` | SetConsent `0x4f74e0` | consent mirror, "true"×3 or "false"×3 |
+| `a8 00 03` | `0xc1c6c0`, result 0 | age-gate Restrictions OK (milestone) |
+| `59 00 0b <u32 age> <u32>` | `0x8de9e8`, ok=1 | age gate passed (milestone) |
+
 ---
 
 ## 3. The `game_portal` value

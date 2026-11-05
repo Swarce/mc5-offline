@@ -542,3 +542,75 @@ The privacy dialog appeared 3 times (12:39, 12:48, 12:55). Each acceptance sent 
 - asset `events_HD_UPD18` and `videos_HD_UPD18`, plus their `metadata/hash`
 
 The `mc5-postlogin-tutorial-gap` workflow is mapping what each of these expects.
+
+## 17. The pre-tutorial "connection error" is the first-run age gate (`ageLimit` popup)
+
+Diagnosis from the `mc5-postlogin-tutorial-gap` workflow (5 areas, each adversarially verified). I re-checked the decisive steps in the disassembly.
+
+**The popup.** The popup is UI string 1733, "Failed to connect! Please check your Internet connection and try again.". The `ageLimit` notification shows it, through `0x8df3d0` → `0x8ffed0` → popup_Notification `0x901c18`. The age FSM `0x8ded40` runs that check every frame. Login and the TS link are not involved, which is why the SetLoginError, EnterConnLost and Anubis hooks stayed silent.
+
+**The chain:**
+1. The age/gender screen `legalNoticePopup` (handler `0xc16cc8`) handles btnAccept by calling `0xc1c4e0(online, age, gender, cb=0x8de9e8)`.
+2. That calls RequestRestrictions `0x13cfc68` → `0x13cc218`. The AgeValidator `0x13df5a8` evaluates locally with no HTTP request: `0x13a20b0` → `0x13919d0` (LegislationVersion < 21).
+3. `0x13919fc ldr x8,[x1,#0xa0]; cbz → 0x1391b50` logs "ExtractRestrictionsFromJsonInfo invalid json!" and returns **0x1c** when the restriction map is **empty**.
+4. Only `0x1391558` fills that map, from `json[<gameTypeName>][<legislation>]`. Our compliancy.json had no game-type section, so the result was always 0x1c. The earlier comment in asset.cpp ("no `<GameType>` section ⇒ no age gate") was wrong.
+5. The completion `0xc1c6c0(0x1c)` calls `cb(ok=0, age, connFail=1)`. `0x8de9e8` sets ageObj+9, and on the next frame the `ageLimit` popup shows. For a new player (xp 0) it shows in every country.
+6. Closing the popup (`0x8f65a4` → `0xaac268`) re-opens `legalNoticePopup`. Its adult GDPR branch shows the Didomi notice again, and each acceptance sends SetConsent `0x4f74e0`: the consent POST plus TS 0xad. That is the 3× loop.
+7. Game state `0x82ea48` stays in 0x26 until `g_0x1bc07a0 ∈ {0,10,11}`. So state 0x2b (the tutorial) is never reached.
+
+**Game type and legislation keys:**
+- Game type is the constant 2 (`0xbcdd2c`, passed to ProcessCompliancy at `0xbcde18`). The name table `0x1391490` (jump table `0x1745668`) maps 1–5 to Adult_Games_ads_off, **Adult_Games_ads_on**, Mixt_Standard, Mixt_Plus and Kids.
+- The legislation key is the matched LegislationTypes entry, or the literal fallback "RotW".
+
+**The fix** (`server/services/asset.cpp`): every game-type name gets `{"RestOfTheWorld":{"none":[]},"RotW":{"none":[]}}`.
+- Any member name is inserted into the map. An unknown name maps to id 0x58 (`0x1395038`). This happens at `0x1391948`–`0x1391978`, after the element loop is skipped for an empty array (`0x13916c8`).
+- With an empty condition vector, the eight handlers do nothing and `0x13919d0` returns 0 (`0x1391b1c`). Then `0xc1c6c0` sends TS 0xa8 and calls `cb(ok=1)`. `0x8de9e8` sends TS 0x59, the age FSM moves 1 → 0xa, and the game state moves 0x26 → 0x2b.
+- **Never `[{}]`.** `0x1392088` adds the restriction unconditionally for every condition object with an empty map (`0x13920ac cbz`).
+- Never name a member after a blocking restriction (0x29, 0x36, 0x2b, 0x47, 0x48).
+- diag.cpp already deletes `compliancy.bin` at every boot, so the new JSON is fetched. The old JSON was cached on the last run.
+
+**Ruled out** (all verified per builder or handler):
+- **TS 0x50, 0x0b, 0x34, 0x52 and 0xad are fire-and-forget.** No state waits for a reply, nothing re-sends, nothing times out.
+  - 0x50: the optional server ack 0x1f only moves `0x1bc5858` from 1 to 2, and nothing else reads that global.
+  - 0x34: its countdown resets regardless of whether the send went through. 0x04/0x28 TCP_Tournaments carries the actual data.
+  - 0x52: "app resumed".
+  - 0xad: mirrors the consent. The meta handler `0xc09780` has no case for type 0xaa or above.
+- **The consent POST.** Callback `0xc19810` only acts on result 0x9d5, so 200 `{}` is correct.
+- **TCP_Profile.** No wait before the mission depends on it. Any 0x03 resets the age and the inventory, so it stays off. `MC5_TS_PROFILE` remains opt-in.
+
+**Other changes this round:**
+- **Absent assets → 404 with no body** (`assets/{cid}/{name}`, `…/metadata`, `…/metadata/hash`, any method): GameOptions, use_custom_param and the events/videos atlas packs.
+  - With 404 the client keeps its bundled GameOptions and drops its stale use_custom_param copy, and the atlas manager parks the slot.
+  - "{}" had been cached as `atlas.dat`/`atlas2.dat` and decoded as banner textures. diag.cpp now deletes those files when they are 64 bytes or smaller, and logs every directory it sweeps.
+  - Do not use 5xx or 408 (they are retried) or 204 (it counts as an error).
+- **HTTP HEAD** responses no longer carry a body (server.cpp), so a kept-alive socket cannot desync.
+- **Explicit storage consent route** → 200 `{}`, with a log line.
+- **meta.cpp labels** the post-login frames and logs milestones: `0xa8` restrictions-ok and `0x59` age gate passed. It also decodes 0xad and 0x0b. It still sends no replies.
+- **New client diagnostics** `install_age_gate_diag()`: seven fingerprint-verified entry traces:
+  - AgeSubmit `0xc1c4e0`
+  - RequestRestrictions `0x13cfc68`
+  - RestrictionsSendCb `0x13a2268`
+  - RestrictionsDone `0xc1c6c0` (result plus restriction ids)
+  - AgeCallback `0x8de9e8`
+  - PopupNotification `0x901c18`, which names every native popup by tag
+  - PopupConnect `0xaa9ad0`
+
+  The poller adds age_state (`0x1bc07a0`), restr_done (online+0x110) and restr_cached (the size of online+0x118).
+
+**Expected device log when the fix works:**
+1. `age-gate: AgeSubmit` → `RequestRestrictions`
+2. `Sending callback … result=0x0`
+3. `restrictions result=0 ids=[] -> OK`
+4. `meta MILESTONE restrictions-ok (0xa8)`
+5. `age-gate: callback ok=1 … PASSED`
+6. `MILESTONE age gate passed (0x59)`
+7. `age_state=10`
+
+There should be no `popup: tag='ageLimit'`.
+
+**Remaining risks:**
+- R1: a non-zero result for another reason (H3/H2 show the code; a synchronous failure shows H6 without H3).
+- R2: the stale `compliancy.bin` is not removed (the server log shows no compliancy.json GET).
+- R4: a silent hang if online+0x118 is non-empty while the result is an error.
+- R5: Didomi keeps re-showing its notice (ShouldConsentBeCollected stays true).
+- R9: after the first mission, `0x8352a0` clears b2 and waits for 0x03 or 0x22. The client then sends 0x21; answering 0x21 with 0x22 is a candidate, not verified.

@@ -370,15 +370,59 @@ bool handle_json_line(MetaConn& m, const std::string& line, bool& connected) {
 }
 
 const char* ts_name(std::uint8_t t) {
+    // Client->server meta frames (docs/research/02 §17). None of the post-login ones
+    // expects a reply: each builder only serialises + sends (verified per builder).
     switch (t) {
         case 0x01: return "ClientSendInitSettings";
+        case 0x05: return "login-cred(alt)";
+        case 0x0b: return "public-info";
         case 0x16: return "ack-0x22";
         case 0x21: return "profile-wait-timeout";
+        case 0x34: return "tournaments-refresh";
         case 0x49: return "request-0x4a";
+        case 0x50: return "login-cred";
+        case 0x52: return "app-resume";
+        case 0x59: return "age-gender (AGE GATE OK)";
+        case 0x5a: return "geo";
         case 0x69: return "0x69";
         case 0x74: return "profile-ack";
         case 0x96: return "reset-b0";
+        case 0xa8: return "restrictions-ok";
+        case 0xad: return "consent";
         default:   return "?";
+    }
+}
+
+std::uint32_t be32(const std::string& p, std::size_t off) {
+    if (p.size() < off + 4) return 0;
+    auto b = [&](std::size_t i) { return static_cast<std::uint32_t>(static_cast<unsigned char>(p[off + i])); };
+    return (b(0) << 24) | (b(1) << 16) | (b(2) << 8) | b(3);
+}
+
+// Readable lines for the frames that mark progress through the first-run flow.
+void log_milestone(MetaConn& m, std::uint8_t type, const std::string& p) {
+    switch (type) {
+        case 0xa8:
+            logi("meta#%d MILESTONE restrictions-ok (0xa8): the age gate's Restrictions check "
+                 "returned 0 with no blocking restriction (0xc1c6c0)", m.id());
+            break;
+        case 0x59:
+            logi("meta#%d MILESTONE age gate passed (0x59): age=%u gender/ui=%u (sent by 0x8de9e8 "
+                 "on success; the tutorial should load next)", m.id(), be32(p, 0), be32(p, 4));
+            break;
+        case 0xad: {
+            BeReader r(p);
+            std::string a = r.str(), b = r.str(), c = r.str();
+            logi("meta#%d consent mirror (0xad): '%s' '%s' '%s' (fire-and-forget; no reply)",
+                 m.id(), a.c_str(), b.c_str(), c.c_str());
+            break;
+        }
+        case 0x0b: {
+            BeReader r(p);
+            logi("meta#%d public-info (0x0b): %s", m.id(), r.str().c_str());
+            break;
+        }
+        default: break;
     }
 }
 
@@ -457,6 +501,7 @@ void serve_meta_conn(ServerContext& ctx, Conn& c, const std::string& peer) {
             if (type == 0x01) continue; // the 0x49 that follows is answered below
         }
 
+        log_milestone(m, type, payload);
         switch (type) {
             case 0x49: m.send_frames(ts_frame(0x4a, std::string(4, '\0')), "0x4a (reply to 0x49)"); break;
             case 0x96: m.send_frames(ts_frame(0x22, ""), "0x22 (reply to 0x96, restores b0)"); break;

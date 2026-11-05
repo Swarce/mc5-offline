@@ -184,7 +184,9 @@ void Server::serve_conn(Conn& c, const std::string& peer) {
         for (auto& h : resp.extra_headers) out += h.first + ": " + h.second + "\r\n";
         out += keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
         out += "\r\n";
-        out += resp.body;
+        // HEAD: status line + headers only (RFC 9110 §9.3.2). The client probes assets
+        // with HEAD; a body here would desync the next response on a kept-alive socket.
+        if (req.method != "HEAD") out += resp.body;
 
         if (c.write(out.data(), out.size()) <= 0) break;
         if (!keep_alive) break;

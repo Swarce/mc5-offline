@@ -67,4 +67,11 @@ int install_login_error_hook();
 // arm64 only. See docs/research/02 §15.
 int install_anubis_diag();
 
+// Diagnostic for the first-run age/gender gate (the pre-tutorial "connection error"
+// was its "ageLimit" popup): entry-trace hooks on the age submit, RequestRestrictions,
+// the Restrictions callback/completion, the age callback and the native notification
+// popups (names every popup by tag). Logging only, each site fingerprint-verified.
+// Returns the number of hooks installed. arm64 only. See docs/research/02 §17.
+int install_age_gate_diag();
+
 } // namespace mc5

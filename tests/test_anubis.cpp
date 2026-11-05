@@ -71,6 +71,14 @@ std::string str16(const std::string& s) {
     return o + s;
 }
 
+std::string read_all(int fd) {
+    std::string out;
+    char b[512];
+    long r;
+    while ((r = ::recv(fd, b, sizeof(b), 0)) > 0) out.append(b, static_cast<std::size_t>(r));
+    return out;
+}
+
 std::string hex(const std::string& s) {
     static const char* H = "0123456789abcdef";
     std::string o;
@@ -141,6 +149,86 @@ int main() {
         CHECK(j["controller_port"].is_number());
         CHECK(j["room_id"].is_string());
         CHECK(j["controller_host"].is_string());
+    }
+
+    // compliancy.json: legislation + the five <GameType> sections, each mapping both
+    // legislation keys to an object whose members are all EMPTY arrays (never [{}]).
+    {
+        Request r;
+        r.method = "GET";
+        r.path = "/asset/assets/" + ctx.client_id + "/compliancy.json";
+        Response resp = router.route(r);
+        CHECK_EQ(resp.status, 200);
+        Json j;
+        CHECK(Json::try_parse(resp.body, j));
+        CHECK(j["LegislationTypes"].is_array());
+        CHECK(j["RestOfTheWorld"].is_array());
+        for (const char* gt : {"Adult_Games_ads_on", "Adult_Games_ads_off", "Mixt_Standard", "Mixt_Plus", "Kids"}) {
+            CHECK(j[gt].is_object());
+            for (const char* leg : {"RestOfTheWorld", "RotW"}) {
+                CHECK(j[gt][leg].is_object());
+                CHECK(j[gt][leg]["none"].is_array());
+                CHECK_EQ(j[gt][leg]["none"].size(), static_cast<std::size_t>(0));
+            }
+        }
+        CHECK(resp.body.find("{}]") == std::string::npos);  // no empty condition object
+    }
+    // Absent assets: 404, empty body; behavioral still served.
+    for (const char* m : {"GET", "HEAD"}) {
+        for (std::string tail : {"/GameOptions", "/use_custom_param", "/events_HD_UPD18",
+                                 "/videos_HD_UPD18/metadata", "/events_HD_UPD18/metadata/hash"}) {
+            Request r;
+            r.method = m;
+            r.path = "/asset//assets/" + ctx.client_id + tail;
+            Response resp = router.route(r);
+            CHECK_EQ(resp.status, 404);
+            CHECK(resp.body.empty());
+        }
+    }
+    {
+        Request r;
+        r.method = "GET";
+        r.path = "/asset//assets/" + ctx.client_id + "/behavioral.json";
+        CHECK_EQ(router.route(r).status, 200);
+    }
+    // Storage consent: 200 "{}".
+    {
+        Request r;
+        r.method = "POST";
+        r.path = "/storage//profiles/me/myprofile/consent";
+        r.body = "access_token=t&consent=%7B%22explicit%22%3Atrue%7D&operation=set";
+        r.form = parse_urlencoded(r.body);
+        Response resp = router.route(r);
+        CHECK_EQ(resp.status, 200);
+        CHECK_EQ(resp.body, std::string("{}"));
+    }
+    // HTTP state machine: HEAD gets headers only, so a kept-alive GET right after it
+    // still parses cleanly.
+    {
+        ServerConfig cfg;
+        cfg.port = 0;  // ephemeral; start() only so serve_conn's running flag is set
+        Server srv(cfg);
+        register_services(srv.router(), ctx);
+        CHECK(srv.start());
+        int hp[2];
+        CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, hp) == 0);
+        std::thread t([&] { SockConn c(hp[0]); srv.serve_conn(c, "test"); });
+        std::string reqs = "HEAD /asset//assets/" + ctx.client_id + "/GameOptions HTTP/1.1\r\nHost: x\r\n\r\n"
+                           "GET /asset/assets/" + ctx.client_id + "/behavioral.json HTTP/1.1\r\nHost: x\r\n"
+                           "Connection: close\r\n\r\n";
+        CHECK(::send(hp[1], reqs.data(), reqs.size(), 0) == static_cast<long>(reqs.size()));
+        set_timeout(hp[1], 3000);
+        std::string all = read_all(hp[1]);
+        ::close(hp[1]);
+        t.join();
+        CHECK(all.rfind("HTTP/1.1 404", 0) == 0);
+        std::size_t second = all.find("HTTP/1.1 200");
+        CHECK(second != std::string::npos);
+        // Nothing between the HEAD headers' blank line and the next status line.
+        std::size_t head_end = all.find("\r\n\r\n");
+        CHECK(head_end != std::string::npos && head_end + 4 == second);
+        CHECK(all.find("rules", second) != std::string::npos);
+        srv.stop();
     }
 
     // Controller + TS channel over a socketpair.
@@ -219,6 +307,25 @@ int main() {
     std::string ka;
     CHECK(read_exact(cl, ka, 3));
     CHECK_EQ(hex(ka), std::string("020003"));
+
+    // Post-login client frames are fire-and-forget: the server must not answer them.
+    {
+        std::string tr = str16("true");
+        std::string post = frame(0x50, std::string("\x00\x00\x00\x02\x00\x00\x00\x00", 8)) +
+                           frame(0x0b, str16("{\"display_name\":\"SOLDIER_1\"}\n")) +
+                           frame(0x34, "") + frame(0x52, "") + frame(0xad, tr + tr + tr) +
+                           frame(0xa8, "") + frame(0x59, std::string("\x00\x00\x00\x1e\x00\x00\x00\x01", 8));
+        CHECK(::send(cl, post.data(), post.size(), 0) == static_cast<long>(post.size()));
+        set_timeout(cl, 400);
+        char b;
+        CHECK(::recv(cl, &b, 1, 0) < 0);
+        // ...and the link is still alive: 0x96 is still answered.
+        set_timeout(cl, 3000);
+        CHECK(::send(cl, f96.data(), f96.size(), 0) == 3);
+        std::string again;
+        CHECK(read_exact(cl, again, 3));
+        CHECK_EQ(hex(again), std::string("220003"));
+    }
 
     ::shutdown(cl, SHUT_RDWR);
     ::close(cl);

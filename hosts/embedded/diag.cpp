@@ -379,6 +379,7 @@ void rm_caches_in(const std::string& dir, int depth, int& budget) {
     if (depth < 0 || budget <= 0) return;
     DIR* d = opendir(dir.c_str());
     if (!d) return;
+    logi("[diag] cache sweep: %s", dir.c_str());
     struct dirent* e;
     std::vector<std::string> subdirs;
     while ((e = readdir(d)) != nullptr) {
@@ -397,6 +398,23 @@ void rm_caches_in(const std::string& dir, int depth, int& budget) {
                         (n.size() >= 10 && n.compare(n.size() - 10, 10, "_cache.bin") == 0);
         if (is_cache) {
             if (unlink(p.c_str()) == 0) logi("[diag] cleared stale url cache: %s", p.c_str());
+            continue;
+        }
+        // atlas.dat / atlas2.dat: the events/videos banner atlas downloads. Earlier
+        // builds answered those asset requests with "{}", which the client stored as
+        // the atlas and then decodes in place of events_HD.bmp / videos_HD.bmp (hook
+        // 0x879900). The client's own cleanup (0xb757b8/0xb757c8) removes
+        // "/atlas*.dat" with a root-absolute path and so never works. Only the
+        // poisoned tiny files are removed; a real atlas is far larger than 64 bytes.
+        if (n == "atlas.dat" || n == "atlas2.dat") {
+            struct stat ast;
+            if (stat(p.c_str(), &ast) == 0 && S_ISREG(ast.st_mode) && ast.st_size <= 64) {
+                if (unlink(p.c_str()) == 0)
+                    logi("[diag] cleared poisoned atlas cache (%lld B): %s",
+                         static_cast<long long>(ast.st_size), p.c_str());
+            } else {
+                logi("[diag] kept atlas cache: %s", p.c_str());
+            }
             continue;
         }
         if (depth > 0) {

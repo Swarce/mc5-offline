@@ -118,6 +118,9 @@ void start_redirect_installer(int http_port, int tls_port) {
                 // Log the Anubis (game_portal) connect: failure suffix + FSM/flag poller.
                 install_anubis_diag();
                 diag::boot_trace("anubis diag installed");
+                // Log the first-run age gate + every native notification popup by tag.
+                install_age_gate_diag();
+                diag::boot_trace("age gate diag installed");
                 // NB: apply_libmc5_connected_gate() (force +0xEC true) is intentionally
                 // NOT called — it advanced the auth FSM to state 9 but did not satisfy the
                 // top-level onLoginCompleted latch (popup persisted behind a black menu),
