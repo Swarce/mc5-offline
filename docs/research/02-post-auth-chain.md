@@ -595,7 +595,23 @@ Diagnosis from the `mc5-postlogin-tutorial-gap` workflow (5 areas, each adversar
   - PopupNotification `0x901c18`, which names every native popup by tag
   - PopupConnect `0xaa9ad0`
 
-  The poller adds age_state (`0x1bc07a0`), restr_done (online+0x110) and restr_cached (the size of online+0x118).
+  The poller adds age_state (`0x1bc07a0`), restr_done (online+0x110), restr_cached (the size of online+0x118), and the ageObj fields (`*(*(base+0x1bc1258)+8)`): +9 pending, +0xa ok, +0xc age, +0x10 connFail.
+  - In the H6 log, gender is encoded: the UI value plus 1, or 0 when the UI value is 3 or more (`0xc1c5c8`). H7 logs the raw UI value.
+
+**Review** (workflow `mc5-agegate-fix-review`, adversarially verified):
+- **No defects** in the compliancy schema. It confirms:
+  - the lookup order `json[gameType][legislation]` (info+0xa0, then info+0x88);
+  - that an empty-array member is inserted (map size 1);
+  - that none of the 8 handlers adds a restriction for an empty condition vector;
+  - that id 0x58 is unused;
+  - that ParseConfigJson reads only the keys it names;
+  - that "RotW" is the fallback key.
+- **No defects** in the 404/HEAD path. A 404 is a clean completion: no retry (backoff applies only to 5xx/408), and `0xc77fc8` acts only for pandora.
+- **Fixed in the hooks:**
+  - `safe_cstr` no longer reads across a page boundary;
+  - the ageObj poller fields were added;
+  - the H6 and H7 gender labels were separated;
+  - H5 no longer logs the unused x0.
 
 **Expected device log when the fix works:**
 1. `age-gate: AgeSubmit` → `RequestRestrictions`

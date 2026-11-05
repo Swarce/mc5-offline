@@ -282,6 +282,7 @@ constexpr uintptr_t kAnRetryVaddr    = 0x1bc585c;
 constexpr uintptr_t kAnGenVaddr      = 0x1bc5860;
 constexpr uintptr_t kAnModeVaddr     = 0x1bc586c;
 constexpr uintptr_t kAgeStateVaddr   = 0x1bc07a0; // age FSM 0x8ded40 state (read at 0x8ded78)
+constexpr uintptr_t kMenuMgrVaddr    = 0x1bc1258; // menu manager global (GOT 0x1b9adc0)
 
 template <typename T>
 bool safe_read(uintptr_t addr, T& out) {
@@ -298,6 +299,7 @@ struct AnubisSnap {
     int ec = -1, f104 = -1, f105 = -1, f134 = -1;
     int cc_state = -1, cc_2920 = -1, cc_reason = -1;
     int age_state = -1, restr_done = -1, restr_cached = -1;
+    int age_pending = -1, age_ok = -1, age_val = -1, age_connfail = -1;
     bool operator!=(const AnubisSnap& o) const { return std::memcmp(this, &o, sizeof(*this)) != 0; }
 };
 
@@ -322,6 +324,18 @@ void anubis_poll_loop(uintptr_t base) {
         // 10/11 = done (game state 0x26 -> 0x2b, the tutorial). online+0x110 = the
         // Restrictions answer arrived; online+0x118/+0x120 = cached restriction ids.
         s.age_state = rd32(base + kAgeStateVaddr);
+        // ageObj = *(menuMgr + 8), menuMgr = *(base+0x1bc1258) (0x4e0470 via GOT 0x1b9adc0;
+        // 0x4299b8). Fields written by the age callback 0x8de9e8: +9 popup pending,
+        // +0xa ok, +0xc age, +0x10 connFail.
+        {
+            uintptr_t mm = 0, ao = 0;
+            if (safe_read(base + kMenuMgrVaddr, mm) && mm && safe_read(mm + 8, ao) && ao) {
+                s.age_pending = rd8(ao + 9);
+                s.age_ok = rd8(ao + 0xa);
+                s.age_val = rd32(ao + 0xc);
+                s.age_connfail = rd8(ao + 0x10);
+            }
+        }
         if (safe_read(base + kOnlinePtrVaddr, online) && online) {
             s.restr_done = rd8(online + 0x110);
             uintptr_t vb = 0, ve = 0;
@@ -357,10 +371,12 @@ void anubis_poll_loop(uintptr_t base) {
         if (!have_last || s != last) {
             logi("anubis-poll: login=%d | anubis fsm=%d op=%d idle=%d retry=%d gen=%d mode=%d | "
                  "gate 58=%d 59=%d 94=%d b0=%d b1=%d b2=%d b3=%d b4=%d b5=%d EC=%d 104=%d 105=%d 134=%d | "
-                 "cc state=%d 2920=%d reason=%d | age_state=%d restr_done=%d restr_cached=%d",
+                 "cc state=%d 2920=%d reason=%d | age_state=%d restr_done=%d restr_cached=%d "
+                 "ageObj pending=%d ok=%d age=%d connFail=%d",
                  s.login, s.fsm, s.op, s.idle, s.retry, s.gen, s.mode,
                  s.f58, s.f59, s.f94, s.b0, s.b1, s.b2, s.b3, s.b4, s.b5, s.ec, s.f104, s.f105, s.f134,
-                 s.cc_state, s.cc_2920, s.cc_reason, s.age_state, s.restr_done, s.restr_cached);
+                 s.cc_state, s.cc_2920, s.cc_reason, s.age_state, s.restr_done, s.restr_cached,
+                 s.age_pending, s.age_ok, s.age_val, s.age_connfail);
             last = s;
             have_last = true;
         }
@@ -528,14 +544,20 @@ int install_trace_hook(const char* label, uintptr_t vaddr, void* logger) {
 // Bounded, crash-proof C-string read (process_vm_readv); non-printables become '.'.
 std::string safe_cstr(unsigned long long addr, std::size_t max = 120) {
     if (addr < 0x1000) return addr ? "<bad>" : "<null>";
+    static const std::size_t ps = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
     std::string out;
     char buf[16];
     while (out.size() < max) {
-        iovec local{buf, sizeof(buf)};
-        iovec remote{reinterpret_cast<void*>(addr + out.size()), sizeof(buf)};
-        if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != static_cast<ssize_t>(sizeof(buf)))
-            return out.empty() ? "<unreadable>" : out + "<unreadable>";
-        for (char ch : buf) {
+        // Never let one read straddle a page boundary: a string whose NUL sits just
+        // before an unmapped page must still be read in full.
+        unsigned long long a = addr + out.size();
+        std::size_t len = std::min<std::size_t>(sizeof(buf), ps - static_cast<std::size_t>(a & (ps - 1)));
+        iovec local{buf, len};
+        iovec remote{reinterpret_cast<void*>(a), len};
+        ssize_t got = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+        if (got <= 0) return out.empty() ? "<unreadable>" : out + "<unreadable>";
+        for (ssize_t i = 0; i < got; ++i) {
+            char ch = buf[i];
             if (ch == '\0') return out;
             out.push_back((ch >= 0x20 && ch < 0x7f) ? ch : '.');
             if (out.size() >= max) break;
@@ -595,19 +617,28 @@ extern "C" void mc5_trace_popup(const char*, unsigned long long msg, unsigned lo
          title ? safe_cstr(title, 64).c_str() : "", safe_cstr(msg).c_str(), lr_off(lr));
 }
 
-// H5 0xaa9ad0 popup_Connect (x1, x2): argument types not fully resolved — logged as
-// raw pointers plus a best-effort C-string read.
-extern "C" void mc5_trace_popup_connect(const char*, unsigned long long x0, unsigned long long x1,
+// H5 0xaa9ad0 popup_Connect(?, const char* a, const char* b, ?, bool w4): x0 is not
+// read (0xaa9afc overwrites it with a singleton getter); x1/x2 are C strings compared
+// against the literal "disconnected" (0xaa9f38/0xaa9f40).
+extern "C" void mc5_trace_popup_connect(const char*, unsigned long long, unsigned long long x1,
                                         unsigned long long x2, unsigned long long lr) {
-    logw("popup-connect: x0=0x%llx x1=0x%llx('%s') x2=0x%llx('%s') lr=+0x%llx", x0, x1,
-         safe_cstr(x1, 64).c_str(), x2, safe_cstr(x2, 64).c_str(), lr_off(lr));
+    logw("popup-connect: a='%s' b='%s' lr=+0x%llx", safe_cstr(x1, 64).c_str(),
+         safe_cstr(x2, 64).c_str(), lr_off(lr));
 }
 
-// H6 0x13cfc68 RequestRestrictions / H7 0xc1c4e0 age submit: (this, age, gender).
+// H7 0xc1c4e0 age submit (online, age, gender): gender is the raw UI value g.
+extern "C" void mc5_trace_age_submit(const char* label, unsigned long long, unsigned long long age,
+                                     unsigned long long gender, unsigned long long lr) {
+    logi("age-gate: %s age=%u gender(ui)=%u lr=+0x%llx", label, static_cast<unsigned>(age),
+         static_cast<unsigned>(gender), lr_off(lr));
+}
+
+// H6 0x13cfc68 RequestRestrictions (svc, age, gender_enc): 0xc1c4e0 encodes the UI
+// gender as g+1, or 0 when g >= 3 (0xc1c5c8 cmp #3; csinc).
 extern "C" void mc5_trace_age_req(const char* label, unsigned long long, unsigned long long age,
                                   unsigned long long gender, unsigned long long lr) {
-    logi("age-gate: %s age=%u gender=%u lr=+0x%llx", label, static_cast<unsigned>(age),
-         static_cast<unsigned>(gender), lr_off(lr));
+    logi("age-gate: %s age=%u gender_enc=%u (=ui+1, 0 if ui>=3) lr=+0x%llx", label,
+         static_cast<unsigned>(age), static_cast<unsigned>(gender), lr_off(lr));
 }
 
 // install_trace_hook with an exact 16-byte fingerprint check first.
@@ -750,7 +781,7 @@ int install_age_gate_diag() {
         {"RequestRestrictions", 0x13cfc68, {0xfc, 0x6f, 0xba, 0xa9, 0xfa, 0x67, 0x01, 0xa9, 0xf8, 0x5f, 0x02, 0xa9, 0xf6, 0x57, 0x03, 0xa9},
          reinterpret_cast<void*>(&mc5_trace_age_req)},
         {"AgeSubmit", 0xc1c4e0, {0xff, 0x03, 0x03, 0xd1, 0xf7, 0x43, 0x00, 0xf9, 0xf6, 0x57, 0x09, 0xa9, 0xf4, 0x4f, 0x0a, 0xa9},
-         reinterpret_cast<void*>(&mc5_trace_age_req)},
+         reinterpret_cast<void*>(&mc5_trace_age_submit)},
     };
     int n = 0;
     for (const auto& h : hooks) n += install_trace_hook_fp(h.label, base + h.vaddr, h.fp, h.logger);
