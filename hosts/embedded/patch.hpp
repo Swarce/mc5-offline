@@ -49,4 +49,12 @@ int install_iris_log_hook();
 // refuses otherwise. Returns the number installed. arm64 only. See docs/research/02 §7.
 int install_login_trace_hooks();
 
+// Diagnostic: replaces the 16-byte Gaia SetLoginError leaf (0xbcd618) with a jump to a
+// logger that writes the login error code ("glrer_…", "glgc_%d", "gldahd", …) and its
+// caller to logcat, then performs the original std::string assignment. Any non-empty
+// code is what makes the game show "Failed to connect!" / "Servers are temporarily
+// overloaded". Behaviour unchanged; 16-byte fingerprint-guarded; returns 1 if installed.
+// arm64 only. See docs/research/02 §13.
+int install_login_error_hook();
+
 } // namespace mc5

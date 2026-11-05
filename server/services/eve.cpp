@@ -6,9 +6,17 @@
 // against this client on device (Nov 2026):
 //
 //   GET config/{clientId}/datacenters
-//     -> [{"name":<dc>,"status":"active","preferred":true,"country_code":"US"}]
+//     -> [{"name":<dc>,"status":"active","preferred":true,"country_code":"US",
+//          "_datacenter_id":<dc>}]
 //        The client takes the first entry with preferred=true; the name must be
 //        non-empty ("Incorrect datacenter" otherwise).
+//        The native Gaia DataCenter parser (libMC5 0xca8ed8) REQUIRES the string
+//        fields name, status, _datacenter_id and the bool preferred (country_code is
+//        optional); a missing _datacenter_id returns -24, the login FSM's
+//        "dataCenter" re-check (0xbcf430 -> callback 0xbd1518) then sets the login
+//        error "glrer_<type>_<code>_<msg>" and the game shows "Failed to connect!"
+//        (every 3rd time "Servers are temporarily overloaded" — same failure, a
+//        retry counter picks the text). See docs/research/02-post-auth-chain.md §13.
 //
 //   GET config/{clientId}/datacenters/{dc}/urls
 //     -> {"pandora":...,"game_portal":...,"ecomm_api_root":...,"crm_iap":..., ...}
@@ -49,6 +57,7 @@ void register_eve(Router& router, ServerContext& ctx) {
         dc["status"] = "active";
         dc["preferred"] = true;
         dc["country_code"] = country;
+        dc["_datacenter_id"] = ctx.data_center;
         arr.push_back(std::move(dc));
         return Response::json(arr.dump());
     });

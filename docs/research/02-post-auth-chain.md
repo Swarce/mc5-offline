@@ -339,3 +339,52 @@ network type) → only drives the separate `noWifiPopup`.
 
 Next: confirm on-device which path runs and slot-0's state at the popup, then make that
 connection actually reach CONNECTED (server-side if it's a socket to our loopback).
+
+## 13. The popup decoded: login error string → "Failed to connect!" (first cause: `_datacenter_id`)
+
+Status: **[V]** static RE + device log `7ca96683` (build `89f79df`+); fix pending on-device.
+
+**Where the text comes from.** The two popups the player sees are native strings from the
+encrypted `strings.gla2` (decoder: `tools/re/gla2.py`, cipher reimplemented from
+`0xbbd2b0`, seed `0x3857a`; a language pack is NUL-separated strings whose ordinal is the
+id passed to GetString `0x8eec38`/`0x841f38`): id **1733** "Failed to connect! Please check
+your Internet connection and try again." and id **1942** "Servers are temporarily
+overloaded. Please try again later." (1938 = "No Internet connection available…").
+
+**Who shows it.** `loginMMError` `0x831fd0`, called from the game state machine `0x82ea48`
+(`0x830f98`, `0x831100`) whenever the global login-error `std::string` @`0x1bc4360`
+(checked by `0x831f58`) is non-empty:
+```
+code == "glni"            -> id 1938 (no internet)
+online+0x438 == 2         -> id 1942 (overloaded), counter reset
+else                      -> id 1733 (failed to connect), counter++
+```
+So "overloaded" is **not** a server condition — it is the same failure on every 3rd retry.
+
+**Who sets the code.** Only `SetLoginError` `0xbcd618` (16-byte leaf → `std::string::assign`
+`0x40b838`), from the Gaia login FSM. Codes: `glrer_<type>_<code>_<msg>` (`0xbd1518`),
+`glrec` (state 2), `gluvr` (state 10), `compliancy error %d` (state 5), `glgc_%d`,
+`gltv/glte/gltewc_%d_%d` (state 12, 180 s timeouts), and `gl<…>` / `gldah{d,b,v,np}` from
+the state-8 gate-false path (after 3 pumps or a flag) → state 11.
+
+**First failure (every launch): the dataCenter re-check.** On `StartLogin(0)` with a stored
+session, state 2 (`0xbcdb00`) calls `0xbcf430`: a Gaia request keyed **`"dataCenter"`**
+(static string char-built at `0x35c1b0`, XOR-0xf5) with callback `0xbd1518`; FSM → state 0.
+The device log shows exactly one request, `GET /config/{cid}/datacenters?country=CA -> 200`,
+then state 11 18 ms later. The callback sees a non-zero result code and sets
+`glrer_…`. Cause: the Gaia DataCenter deserializer `0xca8ed8` requires the string fields
+`name`, `status`, **`_datacenter_id`** and bool `preferred` (`country_code` optional); a
+missing field returns −24. Our eve reply had no `_datacenter_id`. The retry (`StartLogin(2)`)
+happened to skip that call (cached dc) and ran the full chain `3→4→6→5→7→8`.
+
+**Fix (server, clean):** `server/services/eve.cpp` now returns
+`"_datacenter_id": <dc name>` in each datacenter entry.
+
+**Second failure (retry path): state 8.** With the gate `+0xEC` false (§10), state 8 sets a
+`gl<…>` code and goes to state 11 → popup again. §11's gate patch reached state 9 but the
+player still saw the popup over a black screen — consistent with the *first* failure
+(`glrer`, every StartLogin) still firing, which this section explains.
+
+**Diagnostics added:** `install_login_error_hook()` replaces `SetLoginError` with a logger
+(`login-error: SetLoginError("<code>") caller=+0x…`) that then performs the original
+assignment, so the next run names every remaining login error exactly.

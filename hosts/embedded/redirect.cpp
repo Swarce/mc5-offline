@@ -111,6 +111,10 @@ void start_redirect_installer(int http_port, int tls_port) {
                 // preserved).
                 install_login_trace_hooks();
                 diag::boot_trace("login trace hooks installed");
+                // Log every Gaia login error code (the string whose presence makes the
+                // game show "Failed to connect!"), with its caller. Behaviour unchanged.
+                install_login_error_hook();
+                diag::boot_trace("login error hook installed");
                 // NB: apply_libmc5_connected_gate() (force +0xEC true) is intentionally
                 // NOT called — it advanced the auth FSM to state 9 but did not satisfy the
                 // top-level onLoginCompleted latch (popup persisted behind a black menu),

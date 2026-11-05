@@ -113,6 +113,23 @@ const unsigned char kConnGateFp[8] = {0x00, 0xb0, 0x43, 0x39,  // ldrb w0, [x0, 
                                       0xc0, 0x03, 0x5f, 0xd6}; // ret
 const unsigned char kConnGatePatch[4] = {0x20, 0x00, 0x80, 0x52}; // mov w0, #1
 
+// Gaia login SetLoginError(const std::string& code) @ 0xbcd618: a 16-byte leaf that
+// assigns the global login-error string (0x1bc4360) via std::string::assign 0x40b838.
+// A non-empty code makes the game state machine call loginMMError (0x831fd0), which shows
+// "Failed to connect!" (string id 1733) or, every 3rd failure, "Servers are temporarily
+// overloaded" (id 1942; a retry counter at online+0x438 picks the text), or "No Internet
+// connection" (id 1938) for code "glni". Codes: glrer_<type>_<code>_<msg> (dataCenter
+// re-check failed), glrec, gluvr, glgc_%d, gltv/glte/gltewc_%d_%d (180 s timeouts),
+// gl<…>/gldah{d,b,v,np} (state-8 'connected' gate false), "compliancy error %d".
+// We replace the leaf with a jump to a logger that then performs the same assignment, so
+// the exact failing code reaches logcat. Diagnostic only: behaviour is unchanged.
+// 16-byte fingerprint (mov x1,x0 ; adrp x0 ; add x0,x0,#0x360 ; b 0x40b838).
+constexpr uintptr_t kSetLoginErrVaddr  = 0xbcd618;
+constexpr uintptr_t kLoginErrStrVaddr  = 0x1bc4360; // global std::string (login error code)
+constexpr uintptr_t kStrAssignVaddr    = 0x40b838;  // std::string::assign(const string&)
+const unsigned char kSetLoginErrFp[16] = {0xe1, 0x03, 0x00, 0xaa, 0xa0, 0x7f, 0x00, 0xf0,
+                                          0x00, 0x80, 0x0d, 0x91, 0x85, 0xf8, 0xe0, 0x17};
+
 bool set_prot(void* addr, std::size_t len, int prot) {
     long ps = sysconf(_SC_PAGESIZE);
     uintptr_t start = reinterpret_cast<uintptr_t>(addr) & ~(static_cast<uintptr_t>(ps) - 1);
@@ -169,6 +186,29 @@ void mc5_iris_log_tee(void* /*ctx*/, const void* msg) {
     if (data == nullptr) return;
     if (len > 1024) len = 1024; // cap defensively
     logi("gaia[IRIS]: %.*s", static_cast<int>(len), data);
+}
+
+// Replacement for SetLoginError (see kSetLoginErrVaddr). Entered by `br` from the
+// patched leaf, so x0 = &code (the original's argument) and x30 = the original caller's
+// return address. Logs the code + caller, then does exactly what the original did.
+extern "C" void* mc5_set_login_error(const void* code) {
+    unsigned long long lr = reinterpret_cast<unsigned long long>(__builtin_return_address(0));
+    unsigned long long off = (g_mc5_base && lr >= g_mc5_base) ? (lr - g_mc5_base) : lr;
+    const char* data = "";
+    std::size_t len = 0;
+    if (code) {
+        const unsigned char* p = static_cast<const unsigned char*>(code);
+        if (p[0] & 1) { len = *reinterpret_cast<const std::size_t*>(p + 8);
+                        data = *reinterpret_cast<const char* const*>(p + 16); }
+        else          { len = p[0] >> 1; data = reinterpret_cast<const char*>(p + 1); }
+        if (data == nullptr) { data = ""; len = 0; }
+        if (len > 256) len = 256;
+    }
+    if (len) logw("login-error: SetLoginError(\"%.*s\") caller=+0x%llx", static_cast<int>(len), data, off);
+    else     logi("login-error: cleared (caller=+0x%llx)", off);
+    using AssignFn = void* (*)(void*, const void*);
+    AssignFn assign = reinterpret_cast<AssignFn>(g_mc5_base + kStrAssignVaddr);
+    return assign(reinterpret_cast<void*>(g_mc5_base + kLoginErrStrVaddr), code);
 }
 
 // Generic entry-trace callback: logs the function label, first two integer args and
@@ -388,6 +428,32 @@ int install_iris_log_hook() {
     return 1;
 }
 
+int install_login_error_hook() {
+    uintptr_t base = so_base("libMC5.so");
+    if (base == 0) { logw("login-error-hook: libMC5.so not loaded"); return 0; }
+    g_mc5_base = base;
+    void* site = reinterpret_cast<void*>(base + kSetLoginErrVaddr);
+    if (std::memcmp(site, kSetLoginErrFp, sizeof(kSetLoginErrFp)) != 0) {
+        logw("login-error-hook: fingerprint mismatch at %p (got %s) — refusing", site,
+             hexpre(reinterpret_cast<unsigned char*>(site), 16).c_str());
+        return 0;
+    }
+    // ldr x16,#8 ; br x16 ; <8-byte handler address> — exactly the 16-byte leaf.
+    unsigned char tramp[16] = {0x50, 0x00, 0x00, 0x58,  // ldr x16, #8
+                               0x00, 0x02, 0x1f, 0xd6}; // br  x16
+    void* handler = reinterpret_cast<void*>(&mc5_set_login_error);
+    std::memcpy(tramp + 8, &handler, sizeof(handler));
+    if (!set_prot(site, sizeof(tramp), PROT_READ | PROT_WRITE)) {
+        loge("login-error-hook: mprotect RW failed");
+        return 0;
+    }
+    std::memcpy(site, tramp, sizeof(tramp));
+    set_prot(site, sizeof(tramp), PROT_READ | PROT_EXEC);
+    __builtin___clear_cache(reinterpret_cast<char*>(site), reinterpret_cast<char*>(site) + sizeof(tramp));
+    logi("login-error-hook: installed at %p (Gaia login error codes -> logcat)", site);
+    return 1;
+}
+
 int install_login_trace_hooks() {
     uintptr_t base = so_base("libMC5.so");
     if (base == 0) { logw("trace-hooks: libMC5.so not loaded"); return 0; }
@@ -470,6 +536,11 @@ int install_iris_log_hook() {
 
 int install_login_trace_hooks() {
     logw("trace-hooks: no offsets for this ABI (arm64 only)");
+    return 0;
+}
+
+int install_login_error_hook() {
+    logw("login-error-hook: no offset for this ABI (arm64 only)");
     return 0;
 }
 
