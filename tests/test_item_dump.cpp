@@ -113,8 +113,19 @@ int main() {
         m.w<std::uint32_t>(ka + 0x50 * i + 0x20, i == 0 ? fnv1a("none") : fnv1a("unlock_killsig_levelup"));
     }
 
+    // Skills manager: 3 classes, one free (unlockLevel 1).
+    const std::uint64_t S = m.alloc(0x40);
+    std::uint64_t sb = m.vec(S + 0x10, 3, 0x78);
+    const char* cn[3] = {"assault", "heavy", "recon"};
+    for (int i = 0; i < 3; ++i) {
+        m.w<std::uint32_t>(sb + 0x78 * i, fnv1a(cn[i]));
+        m.str(sb + 0x78 * i + 8, cn[i]);
+        m.w<std::int32_t>(sb + 0x78 * i + 0x28, i == 0 ? 1 : 5);
+    }
+
     mc5::itemdump::ReadFn rd = [&m](std::uint64_t a, void* o, std::size_t n) { return m.read(a, o, n); };
-    mc5::itemdump::Result r = mc5::itemdump::dump(rd, A, M);
+    mc5::itemdump::Result r = mc5::itemdump::dump(rd, A, M, S);
+    CHECK((r.groups["classes"] == std::vector<std::string>{"heavy", "recon"}));
     CHECK((r.groups["weapons"] == std::vector<std::string>{"m4a1", "a_weapon_with_a_long_name_x"}));
     CHECK((r.groups["attachments"] == std::vector<std::string>{"m4a1#scope", "m4a1#grip", "a_weapon_with_a_long_name_x#silencer"}));
     CHECK((r.groups["camos"] == std::vector<std::string>{"camo_gold"}));

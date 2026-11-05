@@ -801,6 +801,7 @@ int install_age_gate_diag() {
 namespace {
 constexpr uintptr_t kArmoryGlobalVaddr = 0x1bbed40;  // armory singleton (getter 0x4e5f98)
 constexpr uintptr_t kKillsigMgrVaddr   = 0x1bbed00;  // killsig manager (getter 0x4e5f58)
+constexpr uintptr_t kSkillsMgrVaddr    = 0x1bbed08;  // skills manager (getter 0x4e5f68)
 ItemSink g_item_sink = nullptr;
 std::atomic<int> g_item_dump_tries{0};
 std::atomic<bool> g_item_dump_done{false};
@@ -815,12 +816,13 @@ bool vm_read(std::uint64_t addr, void* out, std::size_t n) {
 extern "C" void mc5_item_dump_hook(const char* label, unsigned long long, unsigned long long,
                                    unsigned long long, unsigned long long) {
     if (g_item_dump_done.load() || !g_item_sink || g_item_dump_tries.fetch_add(1) >= 3) return;
-    std::uint64_t A = 0, M = 0;
+    std::uint64_t A = 0, M = 0, S = 0;
     vm_read(g_mc5_base + kArmoryGlobalVaddr, &A, 8);
     vm_read(g_mc5_base + kKillsigMgrVaddr, &M, 8);
+    vm_read(g_mc5_base + kSkillsMgrVaddr, &S, 8);
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    itemdump::Result r = itemdump::dump(vm_read, A, M);
+    itemdump::Result r = itemdump::dump(vm_read, A, M, S);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     long us = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000;
     for (const auto& n : r.notes) logi("item-dump: %s", n.c_str());

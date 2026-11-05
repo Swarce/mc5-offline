@@ -76,7 +76,7 @@ std::string note(const char* what, const std::string& msg) { return std::string(
 
 } // namespace
 
-Result dump(const ReadFn& rd, std::uint64_t A, std::uint64_t M) {
+Result dump(const ReadFn& rd, std::uint64_t A, std::uint64_t M, std::uint64_t S) {
     Result res;
     Reader r{rd};
     if (A < 0x1000) { res.notes.push_back("armory: not allocated"); return res; }
@@ -232,6 +232,28 @@ Result dump(const ReadFn& rd, std::uint64_t A, std::uint64_t M) {
         else {
             res.notes.push_back(note("killsigs", std::to_string(ks.size()) + " of " + std::to_string(n)));
             if (!ks.empty()) res.groups["killsigs"] = ks;
+        }
+    }
+    // --- soldier classes: skills manager S, SKILL_TREE vector at S+0x10 (stride 0x78):
+    // +0 FNV(name), +8 std::string name, +0x28 unlockLevel (1 = free). Ownership is an
+    // inventory item named after the class (0x5d47b0 -> 0x5e5c90).
+    if (S >= 0x1000) {
+        std::uint64_t b;
+        std::size_t n;
+        std::vector<std::string> cls;
+        bool ok = r.vec(S + 0x10, 0x78, b, n) && n > 0 && n <= 64;
+        for (std::size_t i = 0; ok && i < n; ++i) {
+            std::string nm;
+            std::uint32_t h;
+            std::int32_t lvl;
+            ok = r.str(b + i * 0x78 + 8, nm) && r.get(b + i * 0x78, h) && h == fnv1a(nm) &&
+                 r.get(b + i * 0x78 + 0x28, lvl);
+            if (ok && lvl != 1) cls.push_back(nm);
+        }
+        if (!ok) res.notes.push_back("classes: check failed (built-in names are used)");
+        else {
+            res.notes.push_back(note("classes", std::to_string(cls.size()) + " of " + std::to_string(n)));
+            if (!cls.empty()) res.groups["classes"] = cls;
         }
     }
     return res;

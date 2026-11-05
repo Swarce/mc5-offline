@@ -24,14 +24,15 @@ namespace itemdump {
 using ReadFn = std::function<bool(std::uint64_t addr, void* out, std::size_t n)>;
 
 struct Result {
-    // "weapons", "attachments" ("<weapon>#<att>"), "camos", "gear" (masks, trinkets,
+    // "classes" (soldier classes from skills.bin), "weapons", "attachments" ("<weapon>#<att>"), "camos", "gear" (masks, trinkets,
     // body pieces, body camos), "killsigs". Only items that are not free by default.
     std::map<std::string, std::vector<std::string>> groups;
     std::vector<std::string> notes; // per-list outcome, for the log
 };
 
-// armory = the armory object address; killsig_mgr = *(base+0x1bbed00) (0 to skip).
-Result dump(const ReadFn& rd, std::uint64_t armory, std::uint64_t killsig_mgr);
+// armory = the armory object address; killsig_mgr = *(base+0x1bbed00) and skills_mgr =
+// *(base+0x1bbed08) (0 to skip either).
+Result dump(const ReadFn& rd, std::uint64_t armory, std::uint64_t killsig_mgr, std::uint64_t skills_mgr = 0);
 
 // Exposed for tests.
 std::uint32_t fnv1a(const std::string& s);
