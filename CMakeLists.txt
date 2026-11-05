@@ -66,7 +66,7 @@ if(ANDROID)
 
   # Embedded build: libmc5offline.so, loaded inside the game process. Same server
   # tree, plus the JNI/C bootstrap, diagnostics and TLS. Links liblog + libandroid.
-  add_library(mc5offline SHARED hosts/embedded/bootstrap.cpp hosts/embedded/redirect.cpp hosts/embedded/patch.cpp hosts/embedded/item_dump.cpp hosts/embedded/diag.cpp hosts/embedded/tls.cpp)
+  add_library(mc5offline SHARED hosts/embedded/bootstrap.cpp hosts/embedded/redirect.cpp hosts/embedded/patch.cpp hosts/embedded/item_dump.cpp hosts/embedded/gameplay.cpp hosts/embedded/diag.cpp hosts/embedded/tls.cpp)
   target_link_libraries(mc5offline PRIVATE mc5server mc5hook mbedtls mbedx509 mbedcrypto log android)
   # Keep the C/JNI entry points; strip the rest (incl. mbedTLS) for a small library.
   target_link_options(mc5offline PRIVATE -Wl,--exclude-libs,ALL)

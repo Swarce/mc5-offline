@@ -112,6 +112,30 @@ public:
     void set_universe(ItemUniverse u);
     ItemUniverse universe() const;
 
+    // --- campaign zones (docs/research/06-zones-cheats-bots.md §A) ---
+    // A zone is open iff zone == 0 or inventory "unlocked_zones" >= zone (0x8e2688);
+    // the client never raises the count itself. The host walks the game's own zone
+    // table (story node ids per zone) and hands it over here; the count is then raised
+    // each time every story node of zone U is in progress[].
+    void set_zone_table(const std::map<int, std::vector<std::uint32_t>>& story, int ui_zone_count,
+                        const std::string& source);
+    // The 0x45 {"unlocked_zones":U} frame to send at a menu return ("" = none).
+    std::string take_zone_push(bool first_menu_return);
+    long long unlocked_zones() const;
+
+    // --- purchases / cheats (0x41 [u32 item, u32], 0x42 [u32 item, f32]) ---
+    // Returns the silent 0x45 reply (always one: it releases the client's
+    // "tranzaction_in_progress" lock, pm+0x170, via F1=0 at 0x5f5ac8).
+    std::string on_purchase(std::uint8_t type, const std::string& payload, std::string& log);
+    // Gameplay cheat toggles (written into the game's settings bytes by the host).
+    struct Cheats { bool god = false, ammo = false, medkits = false; };
+    Cheats cheats() const;
+    // Redeem codes that are commands rather than grants (repeatable): GODMODE,
+    // INFINITEAMMO, INFINITEMEDKITS, CHEATSOFF, BOTMATCH, UNLOCKZONES. Returns true if
+    // `code` was one; `what` says what to do ("cheats", "botmatch", "zones").
+    bool command_code(const std::string& code, std::string& what, std::string& log,
+                      std::vector<std::string>& frames);
+
     // --- crash guards (state.json "guards") ---
     bool guard_allowed(const std::string& name) const;
     void guard_arm(const std::string& name, int confirm_after_s);
@@ -132,6 +156,10 @@ private:
                                const Json& custom_items, long long credits, long long gold,
                                bool record);
     Json& inv() { return model_["_inventory"]; }
+    long long zone_cap_locked() const;
+    long long zones_locked() const;
+    bool recompute_zones_locked(const char* why);
+    void set_unlocked_zones_locked(long long u, const char* why);
     bool guard_allowed_locked(const std::string& name) const;
     void guard_arm_locked(const std::string& name, int confirm_after_s);
     void guard_confirm_locked(const std::string& name);
@@ -157,6 +185,8 @@ private:
     bool profile_sent_ = false;
     std::map<std::string, std::chrono::steady_clock::time_point> armed_; // max() = confirmed
     std::string last_mission_key_;
+    bool zones_push_pending_ = false;
+    bool zones_pushed_this_session_ = false;
     ItemUniverse universe_;
     std::set<std::string> user_groups_; // groups from <dir>/items.json (they win over the dump)
 };

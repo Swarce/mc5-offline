@@ -11,6 +11,7 @@
 // C++17.
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -88,5 +89,11 @@ int apply_levelup_rewards_guard();
 // The sink receives {"weapons","attachments","camos","gear","killsigs"} name lists.
 using ItemSink = void (*)(const std::map<std::string, std::vector<std::string>>& groups, const char* source);
 int install_item_dump_hooks(ItemSink sink);
+
+// Entry hook at libMC5 vaddr (16-byte fingerprint, relocatable prologue). The logger is
+// called on the hooked function's thread as logger(label, x0, x1, x2, lr), then the
+// original runs. Returns 1 if installed.
+int install_entry_hook(const char* label, uintptr_t vaddr, const unsigned char (&fp)[16], void* logger);
+uintptr_t libmc5_base();
 
 } // namespace mc5

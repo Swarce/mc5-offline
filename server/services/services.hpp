@@ -9,6 +9,7 @@
 // C++17.
 #pragma once
 
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -72,6 +73,14 @@ struct ServerContext {
     // The player's save + unlock codes (profile.hpp). The host calls
     // progress.open("<files>/MC5Offline") before serving; unopened = in memory.
     Progress progress;
+
+    // Things only the in-process host can do (game memory / game thread). Unset in the
+    // desktop host and the tests. All are fire-and-forget; see hosts/embedded/gameplay.cpp.
+    struct HostHooks {
+        std::function<void(bool god, bool ammo, bool medkits)> apply_cheats;
+        std::function<std::string(int bots)> start_bot_match; // "" queued, else why not
+        std::function<void()> request_zone_walk;
+    } host;
 
     // The player's own restored DLC folder (<files>/bald), answered read-only
     // (bald_mirror.hpp). The host sets the candidate folders.

@@ -3,7 +3,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <string>
+#include <vector>
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -368,6 +370,83 @@ int main() {
         if (std::system(cmd.c_str()) != 0) std::fprintf(stderr, "cleanup failed\n");
     }
 
+    // --- campaign zones, purchases, command codes (research/06) ---
+    {
+        const std::string dz = tmpdir();
+        mc5::Progress pr;
+        pr.open(dz);
+        pr.on_age(20, 1);
+        int seq = 0; // distinct payloads (identical 0x11 payloads are de-duplicated by design)
+        auto finish = [&](const std::string& level, std::uint32_t node) {
+            pr.on_mission_start("{\"level\":\"" + level + "\",\"node\":" + std::to_string(node) + "}\n");
+            pr.on_mission_end(mission_end_frame("{\"xp.rewards\":" + std::to_string(10 + 100 * ++seq) + "}", 0));
+        };
+        finish("Venice_01_Intro", 363515348u);
+        CHECK_EQ(pr.unlocked_zones(), 0);                       // no zone table yet
+        CHECK(pr.take_zone_push(true).empty());
+        // The game's zone table arrives: zone 0 = the tutorial -> zone 1 opens.
+        std::map<int, std::vector<std::uint32_t>> story = {{0, {363515348u}}, {1, {111u, 222u}}, {2, {333u}}};
+        pr.set_zone_table(story, 7, "test");
+        CHECK_EQ(pr.unlocked_zones(), 1);
+        std::string zf = pr.take_zone_push(false);
+        CHECK(!zf.empty());
+        Json zj;
+        CHECK(decode_grant(zf, zj));
+        CHECK_EQ(zj["unlocked_zones"].as_int(), 1);
+        CHECK(pr.take_zone_push(false).empty());                // sent once
+        Json pj = pr.render();
+        CHECK_EQ(pj["_inventory"]["unlocked_zones"].as_int(), 1);
+        CHECK_EQ(pj["_inventory_shadow"]["unlocked_zones"].as_int(), 1);
+        std::string err;
+        CHECK(mc5::Progress::validate(pj, err));
+        // Zone 1 needs both of its story missions.
+        finish("Z1_a", 111u);
+        CHECK_EQ(pr.unlocked_zones(), 1);
+        pr.on_mission_start("{\"level\":\"Z1_b\",\"node\":222}\n");
+        CHECK(pr.take_zone_push(false).empty());                // never during a mission
+        pr.on_mission_end(mission_end_frame("{\"xp.rewards\":11}", 0));
+        CHECK_EQ(pr.unlocked_zones(), 2);
+        pr.on_menu_return();
+        CHECK(!pr.take_zone_push(false).empty());
+        // A new launch re-pushes once at the first menu return, and keeps U.
+        {
+            mc5::Progress p2;
+            p2.open(dz);
+            CHECK_EQ(p2.unlocked_zones(), 2);
+            CHECK(!p2.take_zone_push(true).empty());
+            CHECK(p2.take_zone_push(true).empty());
+        }
+        // Purchases: debug-menu cheats get a silent 0x45; unknown items get {}.
+        auto purchase = [&](std::uint8_t t, std::uint32_t item) {
+            std::string pl;
+            ts::put_u32(pl, item);
+            ts::put_u32(pl, 0);
+            std::string log;
+            Json j;
+            CHECK(decode_grant(pr.on_purchase(t, pl, log), j));
+            return j;
+        };
+        CHECK_EQ(purchase(0x41, 0x7731dd40u)["xp"].as_int(), 1000 + 110 + 210 + 11); // free_xp_1000
+        CHECK_EQ(purchase(0x41, 0x5426327eu)["credits"].as_int(), 1000);    // free_credits
+        CHECK_EQ(purchase(0x41, 0xdeadbeefu).size(), std::size_t(0));       // unknown -> {}
+        CHECK_EQ(purchase(0x42, 0xc1f93cddu)["unlocked_zones"].as_int(), 5);// cheat_unlock_zones -> cap Z-2
+        // Command codes: repeatable toggles and the bot match.
+        std::string what, log;
+        std::vector<std::string> fr;
+        CHECK(pr.command_code(" godmode ", what, log, fr));
+        CHECK_EQ(what, std::string("cheats"));
+        CHECK(pr.cheats().god);
+        CHECK(pr.command_code("GODMODE", what, log, fr));
+        CHECK(!pr.cheats().god);
+        CHECK(pr.command_code("infiniteammo", what, log, fr) && pr.cheats().ammo);
+        CHECK(pr.command_code("CHEATSOFF", what, log, fr) && !pr.cheats().ammo);
+        CHECK(pr.command_code("botmatch", what, log, fr));
+        CHECK_EQ(what, std::string("botmatch"));
+        CHECK(!pr.command_code("UNLOCKALL", what, log, fr));     // a grant code, not a command
+        std::string cmd = "rm -rf '" + dz.substr(0, dz.rfind('/')) + "'";
+        if (std::system(cmd.c_str()) != 0) std::fprintf(stderr, "cleanup failed\n");
+    }
+
     // --- 0x46 for one oversized batch ---
     {
         Json inv = Json::object();
@@ -531,6 +610,13 @@ int main() {
         CHECK(snapshot() == before);
         CHECK_EQ(get(P + "GameOptions", "").status, 404);
         CHECK_EQ(get("/somewhere/else/bald_android_astc_h__toc_244", "").status, 404); // fallback never 200s BALD
+        {   // Quick Play has no dedicated servers offline: "no room".
+            mc5::Request rq;
+            rq.method = "POST";
+            rq.path = "/matchmaker/rooms/1924:56128:6.0.12a:android:googleplay/automatch/quickplayany";
+            mc5::Response qp = router.route(rq);
+            CHECK_EQ(qp.body, std::string("[]"));
+        }
         CHECK(get("/_mc5/status", "").body.find("\"progress\"") != std::string::npos);
         // mode "off": 404 even with a good folder.
         CHECK(mc5::store::save_atomic(sd + "/settings.json", "{\"settingsVersion\":3,\"bald\":{\"mode\":\"off\",\"holdMs\":0}}"));

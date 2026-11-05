@@ -30,7 +30,10 @@ const char* kDefaultSettings = R"JSON({
             "codeCredits":1000000,"codeGold":100000,"purchases":"none"},
  "profile":{"send":true},
  "config":{"sendGame":true},
- "bald":{"mode":"mirror","holdMs":2000,"requireSizes":true}
+ "bald":{"mode":"mirror","holdMs":2000,"requireSizes":true},
+ "campaign":{"zoneUnlock":"progress","zoneCap":0},
+ "cheats":{"serve":true,"freeCredits":1000,"godMode":false,"infiniteAmmo":false,"infiniteMedkits":false},
+ "bots":{"count":6,"code":"BOTMATCH"}
 })JSON";
 
 constexpr long long kCurrencyCap = 2000000000LL;
@@ -297,7 +300,7 @@ void Progress::load_locked() {
     ensure_obj(model_, "statistics");
     for (const char* k : {"general", "sp", "mp"}) ensure_obj(model_["statistics"], k);
     ensure_arr(model_, "progress");
-    for (const char* k : {"redeemed", "skills_raw", "ach_raw", "loadouts", "weapon_stats", "medals", "guards"})
+    for (const char* k : {"redeemed", "skills_raw", "ach_raw", "loadouts", "weapon_stats", "medals", "guards", "zones", "cheats"})
         ensure_obj(state_, k);
     ensure_arr(state_, "seen_0x11");
     ensure_arr(state_, "notif_raw");
@@ -420,6 +423,10 @@ Json Progress::render_locked() const {
     else p["inventory"].erase("loadouts");
     for (const char* k : {"alias", "gender", "birthdate"})
         if (p[k].is_string() && p[k].as_string().empty()) p.erase(k);
+    // The home page compares inventory "unlocked_zones" with its shadow and sends one
+    // 0x48 per session when they differ (G:0xab6628); keep them equal.
+    if (p["_inventory"].contains("unlocked_zones"))
+        p["_inventory_shadow"]["unlocked_zones"] = p["_inventory"]["unlocked_zones"];
     return p;
 }
 
@@ -659,6 +666,7 @@ std::string Progress::on_mission_end(const std::string& payload) {
         state_["ach_raw"][std::to_string(a.id) + "." + std::to_string(a.tier)] = static_cast<long long>(a.sync);
     add_int_stats(model_["statistics"]["sp"], stats);
     state_["missions_completed"] = state_["missions_completed"].as_int() + 1;
+    recompute_zones_locked("mission end");
     logi("[progress] mission end node=%u: +%lld xp (total %lld), +%lld sp, weapons=%zu ach=%zu obj2=%d obj3=%d",
          cur_node_, xp, in["xp"].as_int(), sp, m.weapons.size(), m.achievements.size(), obj2, obj3);
     touch_locked(true);
@@ -930,6 +938,187 @@ RedeemOutcome Progress::unlock_all_once() {
     return o;
 }
 
+// ---------------------------------------------------------------------------
+// Campaign zones
+
+// Read without inserting (Json::operator[] on a non-const object creates a null key).
+long long Progress::zones_locked() const {
+    const Json& m = model_;
+    return m["_inventory"]["unlocked_zones"].as_int(0);
+}
+
+long long Progress::zone_cap_locked() const {
+    long long cap = setting_int("campaign", "zoneCap", 0);
+    if (cap > 0) return cap;
+    long long Z = state_["zones"]["Z"].as_int(0);
+    // The highest index a player can unlock: the cheat aims at 5 (mov w8,#5 @0x8ed394);
+    // with a known UI zone count Z the last regular zone is Z-2 (Z-1 is always open).
+    return Z >= 3 ? Z - 2 : 5;
+}
+
+void Progress::set_unlocked_zones_locked(long long u, const char* why) {
+    long long cur = zones_locked();
+    if (u <= cur) return; // never lowered
+    inv()["unlocked_zones"] = u;
+    model_["_inventory_shadow"]["unlocked_zones"] = u;
+    zones_push_pending_ = true;
+    logi("[zones] unlocked_zones %lld -> %lld (%s)", cur, u, why);
+    touch_locked(true);
+}
+
+bool Progress::recompute_zones_locked(const char* why) {
+    const std::string mode = settings_["campaign"]["zoneUnlock"].as_string("progress");
+    if (mode == "off") return false;
+    long long cap = zone_cap_locked();
+    if (mode == "all") { long long before = zones_locked(); set_unlocked_zones_locked(cap, "campaign.zoneUnlock=all"); return zones_locked() != before; }
+    const Json& story = state_["zones"]["story"];
+    if (!story.is_object() || story.size() == 0) {
+        logi("[zones] no zone table yet (it is read from the game after the first menu return); keeping U=%lld",
+             zones_locked());
+        return false;
+    }
+    std::set<long long> done;
+    for (const Json& e : model_["progress"].elements()) done.insert(e["node"].as_int());
+    long long U = zones_locked(), start = U;
+    while (U < cap) {
+        const Json& nodes = story[std::to_string(U)];
+        if (!nodes.is_array() || nodes.size() == 0) break;
+        std::size_t have = 0;
+        for (const Json& n : nodes.elements()) if (done.count(n.as_int())) ++have;
+        logi("[zones] zone %lld: %zu/%zu story missions complete (%s)", U, have, nodes.size(), why);
+        if (have < nodes.size()) break;
+        ++U;
+    }
+    if (U > start) { set_unlocked_zones_locked(U, why); return true; }
+    return false;
+}
+
+void Progress::set_zone_table(const std::map<int, std::vector<std::uint32_t>>& story, int Z, const std::string& source) {
+    std::lock_guard<std::mutex> g(mu_);
+    Json z = Json::object();
+    z["Z"] = static_cast<long long>(Z);
+    z["source"] = source;
+    Json st = Json::object();
+    std::string summary;
+    for (const auto& kv : story) {
+        Json a = Json::array();
+        for (std::uint32_t id : kv.second) a.push_back(static_cast<long long>(id));
+        st[std::to_string(kv.first)] = a;
+        summary += (summary.empty() ? "" : " ") + std::to_string(kv.first) + ":" + std::to_string(kv.second.size());
+    }
+    z["story"] = st;
+    bool changed = state_["zones"].dump() != z.dump();
+    state_["zones"] = z;
+    if (changed) logi("[zones] zone table from %s: Z=%d cap=%lld story missions per zone {%s}", source.c_str(), Z,
+                      zone_cap_locked(), summary.c_str());
+    recompute_zones_locked("zone table");
+    touch_locked(changed);
+}
+
+std::string Progress::take_zone_push(bool first_menu_return) {
+    std::lock_guard<std::mutex> g(mu_);
+    long long U = zones_locked();
+    if (in_mission_ || U <= 0) return std::string();
+    if (!zones_push_pending_ && !(first_menu_return && !zones_pushed_this_session_)) return std::string();
+    zones_push_pending_ = false;
+    zones_pushed_this_session_ = true;
+    Json j = Json::object();
+    j["unlocked_zones"] = U;
+    return frame_inventory_changes(j);
+}
+
+long long Progress::unlocked_zones() const { std::lock_guard<std::mutex> g(mu_); return model_["_inventory"]["unlocked_zones"].as_int(0); }
+
+// ---------------------------------------------------------------------------
+// Purchases and cheats
+
+std::string Progress::on_purchase(std::uint8_t type, const std::string& p, std::string& log) {
+    std::lock_guard<std::mutex> g(mu_);
+    ts::Reader r(p);
+    std::uint32_t item = r.u32();
+    std::uint32_t arg = r.u32();
+    Json reply = Json::object();
+    char b[160];
+    const bool serve = setting_bool("cheats", "serve", true);
+    // FNV-1a of the debug-menu cheat items (G:0x9eb990 -> 0x6202d8/0x620378).
+    const std::uint32_t kXp1000 = 0x7731dd40u, kXp10000 = 0x137f9750u, kCredits = 0x5426327eu,
+                        kUnlockZones = 0xc1f93cddu;
+    if (serve && type == 0x41 && (item == kXp1000 || item == kXp10000)) {
+        long long add = item == kXp1000 ? 1000 : 10000;
+        inv()["xp"] = clamp_i32(inv()["xp"].as_int() + add);
+        reply["xp"] = inv()["xp"];
+        std::snprintf(b, sizeof(b), "free_xp_%lld (%08x) -> xp %lld", add, item, inv()["xp"].as_int());
+    } else if (serve && type == 0x41 && item == kCredits) {
+        long long add = setting_int("cheats", "freeCredits", 1000);
+        inv()[kHard] = std::min(kCurrencyCap, inv()[kHard].as_int() + add);
+        reply[kHard] = inv()[kHard];
+        std::snprintf(b, sizeof(b), "free_credits (%08x) -> credits %lld", item, inv()[kHard].as_int());
+    } else if (serve && type == 0x42 && item == kUnlockZones) {
+        set_unlocked_zones_locked(zone_cap_locked(), "cheat_unlock_zones");
+        zones_push_pending_ = false; // answered right here
+        reply["unlocked_zones"] = inv()["unlocked_zones"];
+        std::snprintf(b, sizeof(b), "cheat_unlock_zones (%08x) -> unlocked_zones %lld", item, inv()["unlocked_zones"].as_int());
+    } else {
+        std::snprintf(b, sizeof(b), "unknown item %08x arg %08x -> {} (releases the purchase lock, no change)", item, arg);
+    }
+    log = std::string("0x") + (type == 0x41 ? "41" : "42") + " " + b;
+    touch_locked(true);
+    return frame_inventory_changes(reply);
+}
+
+Progress::Cheats Progress::cheats() const {
+    std::lock_guard<std::mutex> g(mu_);
+    Cheats c;
+    const Json& st = state_["cheats"];
+    c.god = st["godMode"].is_bool() ? st["godMode"].as_bool() : setting_bool("cheats", "godMode", false);
+    c.ammo = st["infiniteAmmo"].is_bool() ? st["infiniteAmmo"].as_bool() : setting_bool("cheats", "infiniteAmmo", false);
+    c.medkits = st["infiniteMedkits"].is_bool() ? st["infiniteMedkits"].as_bool() : setting_bool("cheats", "infiniteMedkits", false);
+    return c;
+}
+
+bool Progress::command_code(const std::string& raw, std::string& what, std::string& log, std::vector<std::string>& frames) {
+    const std::string code = normalize_code(raw);
+    std::lock_guard<std::mutex> g(mu_);
+    auto toggle = [&](const char* key, const char* label) {
+        Json& st = state_["cheats"];
+        bool cur = st[key].is_bool() ? st[key].as_bool() : setting_bool("cheats", key, false);
+        st[key] = !cur;
+        log = std::string(label) + (cur ? " OFF" : " ON");
+        what = "cheats";
+        touch_locked(true);
+        return true;
+    };
+    if (code == "GODMODE") return toggle("godMode", "god mode");
+    if (code == "INFINITEAMMO") return toggle("infiniteAmmo", "infinite ammo");
+    if (code == "INFINITEMEDKITS") return toggle("infiniteMedkits", "infinite medkits");
+    if (code == "CHEATSOFF") {
+        for (const char* k : {"godMode", "infiniteAmmo", "infiniteMedkits"}) state_["cheats"][k] = false;
+        log = "all gameplay cheats OFF";
+        what = "cheats";
+        touch_locked(true);
+        return true;
+    }
+    if (code == normalize_code(settings_["bots"]["code"].as_string("BOTMATCH"))) {
+        log = "local bot match requested (" + std::to_string(setting_int("bots", "count", 6)) + " bots)";
+        what = "botmatch";
+        return true;
+    }
+    if (code == "UNLOCKZONES") {
+        set_unlocked_zones_locked(zone_cap_locked(), "code UNLOCKZONES");
+        long long U = zones_locked();
+        if (!in_mission_ && U > 0) {
+            Json j = Json::object();
+            j["unlocked_zones"] = U;
+            frames.push_back(frame_inventory_changes(j));
+            zones_push_pending_ = false;
+        }
+        log = "all campaign zones unlocked (unlocked_zones=" + std::to_string(U) + ")";
+        what = "zones";
+        return true;
+    }
+    return false;
+}
+
 Json Progress::status() const {
     std::lock_guard<std::mutex> g(mu_);
     Json s = Json::object();
@@ -954,6 +1143,9 @@ Json Progress::status() const {
     s["universe"] = u;
     s["universe_source"] = universe_.source;
     s["unlock_all_done"] = state_["unlockAllDone"].as_bool();
+    s["unlocked_zones"] = model_["_inventory"]["unlocked_zones"].as_int(0);
+    s["zone_table_Z"] = state_["zones"]["Z"].as_int(0);
+    s["cheats"] = state_["cheats"];
     return s;
 }
 

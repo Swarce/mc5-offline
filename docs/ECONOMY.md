@@ -86,6 +86,18 @@ over the internet.
 | `UNLOCKCURRENCY` | +1,000,000 Credits and +100,000 Gold (both capped at 2,000,000,000) |
 | your own | see `redeem.codes` below |
 
+**Command codes** can be used any number of times and show no reward popup:
+
+| Code | Effect |
+|---|---|
+| `UNLOCKZONES` | opens every campaign zone |
+| `GODMODE` / `INFINITEAMMO` / `INFINITEMEDKITS` | toggle the game's own debug cheats; they persist and are re-applied at each mission start |
+| `CHEATSOFF` | turns all three off |
+| `BOTMATCH` | **experimental:** starts a local multiplayer match with you as the host and `bots.count` bots. Open the Multiplayer menu once first |
+
+**Campaign zones** open the way they did online. Once you have finished every story mission of a zone, the next
+zone unlocks when you return to the menu. The server reads the zone and mission list from your own game data.
+
 How the codes behave:
 
 * Codes are case-insensitive and surrounding spaces are ignored.

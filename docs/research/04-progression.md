@@ -113,7 +113,8 @@ Framing: `[type u8][len u16 BE incl. 3-byte header][payload]`. `str` = u16 BE le
 | 0x53 | `str code` | §4.3 | §4.3 |
 | 0x41 | `u32 itemHash, u32 qty` | 0x45 (§2.5) | §2.5 |
 | 0x42 | `u32 itemHash, f32 LE qty` (e.g. `cheat_unlock_zones`) | 0x45 (§2.5) | §2.5 |
-| 0x44, 0x4d, 0x48 | format not mapped | 0x45 error (§2.5) | log full payload |
+| 0x44, 0x4d | format not mapped | none yet | log full payload |
+| 0x48 | `u32 itemHash, u32 sub, u32 0, u32 0x811c9dc5` (home-page item-change claim, 0xc0ebe0) | none (no lock) | log (research/06 §A.5) |
 
 Parser rules:
 - Parse every frame field by field with a bounds check. The client's builders ignore the overflow flag, so a refused string or blob can vanish **from the middle** of a frame while later small fields are still written.

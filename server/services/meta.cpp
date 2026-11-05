@@ -289,6 +289,8 @@ public:
     }
 
     ServerContext& ctx() { return ctx_; }
+    // True exactly once per connection: the first 0x24 menu return.
+    bool first_menu_return() { bool f = !menu_seen_; menu_seen_ = true; return f; }
 
     // Every server->client frame over 48 bytes in full (burst, profile, 0x12, 0x45/0x46),
     // one entry per frame, <=800-char parts, with the payload FNV for cross-checking.
@@ -324,6 +326,7 @@ private:
     std::mutex cvm_;
     std::condition_variable cv_;
     bool stop_ = false;
+    bool menu_seen_ = false;
 };
 
 // A JSON line on the controller socket (phase A, or unexpectedly in phase B).
@@ -484,7 +487,15 @@ void handle_frame(MetaConn& m, std::uint8_t type, const std::string& p) {
         case 0x59: pr.on_age(be32(p, 0), be32(p, 4)); break;
         case 0x0b: pr.on_public_info(r.str()); break;
         case 0x10:
-        case 0x2d: pr.on_mission_start(r.str()); break;
+        case 0x2d: {
+            pr.on_mission_start(r.str());
+            // Re-assert the gameplay cheat bytes at every mission start (the game also
+            // reloads its settings file, settings_new.dat).
+            auto& h = m.ctx().host;
+            Progress::Cheats c = pr.cheats();
+            if (h.apply_cheats && (c.god || c.ammo || c.medkits)) h.apply_cheats(c.god, c.ammo, c.medkits);
+            break;
+        }
         case 0x06: {
             // Level-data request [str lvcName, u32 cachedVer]: answer "no server copy"
             // (07 u32 0 -> 0x831cb8, the local packs) instead of making the level
@@ -503,7 +514,18 @@ void handle_frame(MetaConn& m, std::uint8_t type, const std::string& p) {
             break;
         }
         case 0xac: pr.on_mission_fail_stats(r.str()); break;
-        case 0x24: pr.on_menu_return(); break;
+        case 0x24: {
+            pr.on_menu_return();
+            // Campaign zones: the game's zone table is read on the game thread; the count
+            // "unlocked_zones" is pushed silently when it grew (or once per connection).
+            if (m.ctx().host.request_zone_walk) m.ctx().host.request_zone_walk();
+            std::string zf = pr.take_zone_push(m.first_menu_return());
+            if (!zf.empty()) {
+                logi("meta#%d zones: unlocked_zones=%lld -> 0x45 (silent)", m.id(), pr.unlocked_zones());
+                m.send_frames(zf, "0x45 unlocked_zones");
+            }
+            break;
+        }
         case 0x16: pr.on_loadout(p); break;
         case 0x17: { unsigned a = r.u8(), b = r.u8(), c = r.u8(); if (r.ok) pr.on_skill(a, b, c); break; }
         case 0x19: { std::uint32_t id = r.u32(), tier = r.u32(); unsigned s = r.u8(); if (r.ok) pr.on_achievement(id, tier, s); break; }
@@ -512,6 +534,26 @@ void handle_frame(MetaConn& m, std::uint8_t type, const std::string& p) {
         case 0xa3: if (!p.empty()) pr.on_difficulty(static_cast<unsigned char>(p[0])); break;
         case 0x53: {
             std::string code = r.str();
+            {   // Command codes (cheats, bot match, zones): repeatable, no reward popup.
+                std::string what, log;
+                std::vector<std::string> frames;
+                if (pr.command_code(code, what, log, frames)) {
+                    auto& h = m.ctx().host;
+                    if (what == "cheats") {
+                        Progress::Cheats c = pr.cheats();
+                        if (h.apply_cheats) h.apply_cheats(c.god, c.ammo, c.medkits);
+                        else log += " (no in-game host: nothing applied)";
+                    } else if (what == "botmatch") {
+                        std::string why = h.start_bot_match
+                            ? h.start_bot_match(static_cast<int>(pr.settings()["bots"]["count"].as_int(6)))
+                            : std::string("no in-game host");
+                        log += why.empty() ? " -> queued for the game thread" : " -> NOT started: " + why;
+                    }
+                    logi("meta#%d CODE '%s': %s", m.id(), normalize_code(code).c_str(), log.c_str());
+                    for (const auto& f : frames) m.send_frames(f, "0x45 code grant");
+                    break;
+                }
+            }
             RedeemOutcome o = pr.redeem(code);
             logi("meta#%d REDEEM '%s' -> %s: %s (%d items, +%lld credits, +%lld gold, %zu frames, popup %s)",
                  m.id(), o.code.c_str(), o.valid ? "OK" : "INVALID", o.reason.c_str(), o.items, o.credits,
@@ -529,8 +571,22 @@ void handle_frame(MetaConn& m, std::uint8_t type, const std::string& p) {
             m.spawn([mp, o] { push_grants(*mp, o, true); });
             break;
         }
-        case 0x41: case 0x42: case 0x44: case 0x48: case 0x4d:
-            logw("meta#%d purchase frame 0x%02x not served (settings economy.purchases='none')", m.id(), type);
+        case 0x41:
+        case 0x42: {
+            // Debug-menu cheats and shop purchases. Always answer: the client holds a
+            // "tranzaction_in_progress" lock (pm+0x170) until a 0x45 arrives.
+            std::string log;
+            std::string f = pr.on_purchase(type, p, log);
+            logi("meta#%d %s", m.id(), log.c_str());
+            m.send_frames(f, "0x45 purchase reply");
+            break;
+        }
+        case 0x48:
+            // Item-change claim from the home page (0xc0ebe0: no lock, no reply needed).
+            logi("meta#%d 0x48 item-change claim item=%08x sub=%u (no reply needed)", m.id(), be32(p, 0), be32(p, 4));
+            break;
+        case 0x44: case 0x4d:
+            logw("meta#%d purchase frame 0x%02x not served (format not mapped)", m.id(), type);
             break;
         default: break; // 0x74 / 0x69 / 0x50 / 0x34 / 0x66 and the rest: logged above
     }

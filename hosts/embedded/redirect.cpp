@@ -17,6 +17,7 @@
 #include "diag.hpp"
 #include "gothook.hpp"
 #include "patch.hpp"
+#include "gameplay.hpp"
 
 namespace mc5 {
 
@@ -128,6 +129,9 @@ void start_redirect_installer(int http_port, int tls_port, ItemSink item_sink) {
                 // Unlock-code item lists from the game's own armory (game thread).
                 if (item_sink) install_item_dump_hooks(item_sink);
                 diag::boot_trace("item dump hooks installed");
+                // Game-thread services: cheat bytes, zone table walk, local bot match.
+                gameplay::install();
+                diag::boot_trace("gameplay hooks installed");
                 // NB: apply_libmc5_connected_gate() (force +0xEC true) is intentionally
                 // NOT called — it advanced the auth FSM to state 9 but did not satisfy the
                 // top-level onLoginCompleted latch (popup persisted behind a black menu),

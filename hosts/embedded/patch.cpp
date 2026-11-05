@@ -833,6 +833,15 @@ extern "C" void mc5_item_dump_hook(const char* label, unsigned long long, unsign
 }
 } // namespace
 
+int install_entry_hook(const char* label, uintptr_t vaddr, const unsigned char (&fp)[16], void* logger) {
+    uintptr_t base = so_base("libMC5.so");
+    if (base == 0) { logw("entry-hook %s: libMC5.so not loaded", label); return 0; }
+    g_mc5_base = base;
+    return install_trace_hook_fp(label, base + vaddr, fp, logger);
+}
+
+uintptr_t libmc5_base() { return so_base("libMC5.so"); }
+
 int install_item_dump_hooks(ItemSink sink) {
     uintptr_t base = so_base("libMC5.so");
     if (base == 0) { logw("item-dump: libMC5.so not loaded"); return 0; }
@@ -995,6 +1004,13 @@ int install_item_dump_hooks(ItemSink) {
     logw("item-dump: no offsets for this ABI (arm64 only)");
     return 0;
 }
+
+int install_entry_hook(const char* label, uintptr_t, const unsigned char (&)[16], void*) {
+    logw("entry-hook %s: arm64 only", label);
+    return 0;
+}
+
+uintptr_t libmc5_base() { return 0; }
 
 #endif
 

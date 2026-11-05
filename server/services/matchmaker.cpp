@@ -41,6 +41,18 @@ std::string cut(const std::string& s, std::size_t n = 8) {
 }
 
 Response quick_join(ServerContext& ctx, const Request& req) {
+    // Multiplayer Quick Play (automatch quickplayany / quickplaynewplayer /
+    // quickplayzombie) wanted Gameloft's dedicated game servers: a joined client is never
+    // the match authority (0x8cd650 clears conn+0x6c), so it cannot run bots. Answer "no
+    // room" quickly (the client shows its own error) instead of handing out our TS
+    // controller, which only made the client open a second TS socket and time out.
+    // Offline bot matches are started locally instead (redeem code BOTMATCH).
+    const std::string am = req.param("automatcher");
+    if (am.compare(0, 9, "quickplay") == 0) {
+        logi("matchmaker: Quick Play '%s' filter='%s' server_type='%s' -> [] (offline: use the BOTMATCH code "
+             "for a local bot match)", am.c_str(), req.value("filter").c_str(), req.value("server_type").c_str());
+        return Response::json("[]");
+    }
     int n;
     {
         std::lock_guard<std::mutex> g(ctx.anubis.mu);

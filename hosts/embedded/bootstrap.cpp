@@ -24,6 +24,7 @@
 #include "../../server/core/server.hpp"
 #include "../../server/services/services.hpp"
 #include "diag.hpp"
+#include "gameplay.hpp"
 #include "redirect.hpp"
 #include "tls.hpp"
 
@@ -70,6 +71,11 @@ void start_locked(const std::string& data_dir) {
         mc5::diag::remove_offline_bald_cache();
         // The player's restored DLC folder, answered read-only (bald_mirror.hpp).
         const char* kPkg = "com.gameloft.android.ANMP.GloftM5HM";
+        // Game-thread services the server can ask for (cheats, zone walk, bot match).
+        mc5::gameplay::set_context(g_ctx.get());
+        g_ctx->host.apply_cheats = [](bool g, bool a, bool m) { mc5::gameplay::queue_cheats(g, a, m); };
+        g_ctx->host.request_zone_walk = [] { mc5::gameplay::queue_zone_walk(); };
+        g_ctx->host.start_bot_match = [](int n) { return mc5::gameplay::queue_bot_match(n); };
         g_ctx->bald.set_dirs({std::string("/sdcard/Android/data/") + kPkg + "/files/bald",
                               std::string("/storage/emulated/0/Android/data/") + kPkg + "/files/bald",
                               std::string("/data/data/") + kPkg + "/files/bald",
