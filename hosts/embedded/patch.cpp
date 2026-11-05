@@ -56,6 +56,15 @@ constexpr uintptr_t kTrOnLoginFailed    = 0x1354418; // Gaia -> Lua onLoginFaile
 constexpr uintptr_t kTrOnDisconnected   = 0x1353fb8; // Gaia -> Lua onDisconnected
 constexpr uintptr_t kTrStartLogin       = 0xbcd410;  // OnlineFramework StartLogin (re-login trigger)
 
+// Round 3 proved: HTTP chain completes every cycle, but NONE of the three Gaia->Lua
+// terminal callbacks ever fire, and Lua re-calls StartLogin ~1/s. So the Gaia login
+// state machine (pump 0xbcdab0) stalls after the HTTP chain without reaching the state
+// that fires onLoginCompleted. The pump reads its state index from the global word at
+// 0x1bc434c (idx = *0x1bc434c - 2; states 2..13). We hook the pump and log the state on
+// each change to see exactly where it stops (state 5=compliancy, 9≈terminal).
+constexpr uintptr_t kTrLoginFSM   = 0xbcdab0;   // Gaia login/update FSM pump
+constexpr uintptr_t kFsmStateWord = 0x1bc434c;  // FSM state global (int)
+
 uintptr_t g_mc5_base = 0; // cached libMC5 base for LR->file-offset in trace logs
 
 // asio::ssl::detail::engine::verify_callback_function(int, X509_STORE_CTX*) — the
@@ -136,6 +145,22 @@ extern "C" void mc5_trace(const char* label, unsigned long long a0, unsigned lon
     unsigned long long off = (g_mc5_base && lr >= g_mc5_base) ? (lr - g_mc5_base) : lr;
     logi("trace: %s x0=0x%llx x1=0x%llx x2=0x%llx(w2=%u) lr=+0x%llx",
          label, a0, a1, a2, static_cast<unsigned>(a2 & 0xffffffffu), off);
+}
+
+// Specialised trace for the Gaia login FSM pump: reads the FSM state global
+// (base+kFsmStateWord) and logs only when it changes, giving a clean state-transition
+// sequence (so we see the exact state the login stalls in). The pump runs often (per
+// I/O completion + per frame), so on-change filtering keeps the log readable.
+extern "C" void mc5_trace_fsm(const char* /*label*/, unsigned long long /*a0*/,
+                              unsigned long long /*a1*/, unsigned long long /*a2*/,
+                              unsigned long long lr) {
+    static int last = -0x7fffffff;
+    if (g_mc5_base == 0) return;
+    int st = *reinterpret_cast<volatile int*>(g_mc5_base + kFsmStateWord);
+    if (st == last) return;
+    last = st;
+    unsigned long long off = (lr >= g_mc5_base) ? (lr - g_mc5_base) : lr;
+    logi("fsm-state: %d (pump lr=+0x%llx)", st, off);
 }
 
 // Reject relocating an instruction that is PC-relative (adr/adrp, b/bl, b.cond,
@@ -296,12 +321,14 @@ int install_login_trace_hooks() {
     if (base == 0) { logw("trace-hooks: libMC5.so not loaded"); return 0; }
     g_mc5_base = base;
     void* gen = reinterpret_cast<void*>(&mc5_trace);
+    void* fsm = reinterpret_cast<void*>(&mc5_trace_fsm);
     int n = 0;
     n += install_trace_hook("onLoginCompleted", base + kTrOnLoginCompleted, gen);
     n += install_trace_hook("onLoginFailed",    base + kTrOnLoginFailed,    gen);
     n += install_trace_hook("onDisconnected",   base + kTrOnDisconnected,   gen);
     n += install_trace_hook("StartLogin",       base + kTrStartLogin,       gen);
-    logi("trace-hooks: %d/4 Gaia login-event entry hooks installed", n);
+    n += install_trace_hook("LoginFSM",         base + kTrLoginFSM,         fsm);
+    logi("trace-hooks: %d/5 Gaia login-event entry hooks installed", n);
     return n;
 }
 
