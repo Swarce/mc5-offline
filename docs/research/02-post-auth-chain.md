@@ -287,3 +287,26 @@ client sets `+0xEC` itself. Next: pin the alert "connection" event wire format (
 event name + data → the `msg[0xe]/0xf` fields) and emit it from `server/services/alert.cpp`.
 Gate getter `0x707ec0` has 8 callers (login FSM + ~7 online-state checks), so a patch
 would be broad; the event path sets the real flag consistently.
+
+## 11. Gate patch result: popup GONE, now past login into a black menu screen (build 55aa4dd)
+
+Status: **[V]** on-device (log `a25299b4`/`d19de46f`).
+
+The connected-gate patch (`0x707ec0` -> `mov w0,#1`) works at the FSM level: the login
+FSM now reaches **state 9** (success terminal) instead of the stuck state 11, and
+`popupConnectionLost` is **gone**. The game advances into a NEW phase never seen before:
+`POST /auth/authorize scope='config storage_ro'`, `HEAD/GET .../use_custom_param`,
+`.../videos_HD_UPD18(+/metadata/hash)`, `.../events_HD_UPD18(+/metadata/hash)` — i.e.
+menu config/content loading.
+
+Remaining issue: `onLoginCompleted` (`0x1354158`) still never fires — reaching FSM
+state 9 does NOT fire it (it's a separate OnlineFramework delegate vtable call, slot 1 of
+vtable `0x1b90c28`). The Lua dispatcher `0x8f4e40` re-calls `StartLogin(2)` ~8× in 7s
+(21:22:26→33) then **stops**; afterwards the game is idle on a **black screen** (watchdog
+only, no requests). Rendering is fine (Vulkan, frames composited) — it's a content/UI
+state, not a render crash. Content assets (`use_custom_param`, `videos_HD_UPD18`,
+`events_HD_UPD18`) are currently served by the catch-all (empty/minimal).
+
+Open: (a) does onLoginCompleted need to fire for the menu, or did login settle? (b) is the
+black screen the age/gender first-run UI with no content, or a stuck menu? Next: identify
+what the post-login menu/first-run screen needs (content assets and/or the login-latch).
