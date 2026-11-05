@@ -310,3 +310,32 @@ state, not a render crash. Content assets (`use_custom_param`, `videos_HD_UPD18`
 Open: (a) does onLoginCompleted need to fire for the menu, or did login settle? (b) is the
 black screen the age/gender first-run UI with no content, or a stuck menu? Next: identify
 what the post-login menu/first-run screen needs (content assets and/or the login-latch).
+
+## 12. The real popup trigger: network-session connection slot 0 not CONNECTED
+
+Status: **[V]** static RE (runtime confirmation pending, build `4ddf4cd`).
+
+Runtime round 5 showed the connection-state handler `0xb00508` (only setter of +0xEC)
+**never fires**. The "login listener" vtable `0x1b90c28` turned out to be the Vivox
+voice-chat listener (onConnectCompleted/onConnectFailed/onDisconnected/onLoginCompleted/
+onInvalidLoginCredentials/onLoginFailed/onLogoutCompleted/onLogoutFailed/
+onChannelJoined; Vivox SIP/channel code in `0xbb9xxx`) — not the account login.
+
+`popupConnectionLost` is *opened by the SWF*; native `0x8f4e40` is the SWF button
+dispatcher (by popup name). Its OK action (`0x8f76f0`) sets the front-end manager
+(`m = 0x4e2108()`) state `m+0xB454 = 2`, clears `m+0xB45C` — that state drives the
+`StartLogin(x1=2)` retries. The front-end per-frame check **`0xb30438`** enters
+"connection lost" via **`0xb30d80`** (sets `m+0xB454 = 1`) when:
+```
+conn = m->+0x10
+lost = !conn || ( conn->u8[0x6c] == 0  &&  conn->i32[0x98 + 4*0] != 2 )
+```
+i.e. **slot 0 of the network-session connection table is not CONNECTED (2)**. Slot
+handles at `conn+0x90+8*i`, states at `conn+0x98+4*i`; set by `0x8cc370` (→1
+connecting) and `0x8cc3b0` (→2 connected). Paths: `0x8cc228` (local: connecting then
+connected immediately) and `0xae5928 → 0x8ccdf0` (remote asio connect + handshake).
+Not the cause: `isConnectionOK` (= `acp_utils::PackageUtils::GetConnectionType`, device
+network type) → only drives the separate `noWifiPopup`.
+
+Next: confirm on-device which path runs and slot-0's state at the popup, then make that
+connection actually reach CONNECTED (server-side if it's a socket to our loopback).
