@@ -630,3 +630,37 @@ There should be no `popup: tag='ageLimit'`.
 - R4: a silent hang if online+0x118 is non-empty while the result is an error.
 - R5: Didomi keeps re-showing its notice (ShouldConsentBeCollected stays true).
 - R9: after the first mission, `0x8352a0` clears b2 and waits for 0x03 or 0x22. The client then sends 0x21; answering 0x21 with 0x22 is a candidate, not verified.
+
+## 18. Device round d86ee5c: the age gate passes and the campaign plays (2026-11-05)
+
+**What worked.** The §17 fix worked exactly as the oracle predicted (age 20, gender ui 2):
+- `AgeSubmit` → `RequestRestrictions` → `Sending callback result=0x0` → `restrictions result=0 ids=[] -> OK` → `callback ok=1 -> PASSED`
+- TS 0x59 and 0xa8 arrived, and no `ageLimit` popup appeared.
+
+The player then:
+1. played the tutorial mission (the mission-end stats screen never loaded, but progress continued);
+2. saw the second mission's cutscene;
+3. reached the main menu.
+
+**New issues:**
+- **Currencies show -1** (credits and gold). Otherwise the account looks like a starter account. No TCP_Profile (0x03) has ever been sent.
+- **Opening Profile → stats crashes** with SIGSEGV at address 0 in libMC5 at `0x95e6ec`. libMC5's base was 0x7508132000 (AgeCallback hook address minus `0x8de9e8`). The backtrace runs `0x95e6ec ← 0xd82ff4 ← 0xd44bcc ← 0xde4870 ← 0xd43e54 ← (0xd63158 / 0xd7128c / 0xd6ef9c, recursive) ← 0xdac6ac ← 0xda9c64 ← 0xda439c ← 0xdbeb58 ← 0xaa1318 (menu update) ← 0x4ef444 ← 0x4f346c ← 0x4a9984`.
+- **The `bald_android_astc_h___index` asset 404 storm.** The client requested it 2680 times in about 70 s.
+- **New client TS frames** (see `ts-full` lines, logged in full from now on):
+
+  | Frame | Payload |
+  |---|---|
+  | 0x10 | `{"level":"Venice_01_Intro","node":363515348}` |
+  | 0x11 | 833 B colon-separated numbers |
+  | 0x06 | `"Story_01.lvc"` ffffffff |
+  | 0x24 | empty |
+  | 0xa3 | `00` |
+  | 0x32 | `03000101` / `03000001` |
+  | 0xac | `{"time.played":1}` |
+  | 0x16 | `01 0003 ..` `{"bodyitems":["assault_arms_A",…` (861 B; the save/loadout upload) |
+  | 0x17 | `000001` |
+  | 0x19 | `0000000b0000000000` |
+  | 0x1a | `"achievements"` 00000000 000b 0005 |
+  | 0x66 | empty |
+
+The `mc5-progression-unlocks` workflow is mapping all of these, together with the TCP_Profile schema and an MCVS-style unlock-code design.

@@ -369,6 +369,24 @@ bool handle_json_line(MetaConn& m, const std::string& line, bool& connected) {
     return m.send_line(r);
 }
 
+// Long client frames carry the progression uploads (0x11, 0x16 profile JSON, ...): log
+// them in full so a device run captures the exact formats. Printable runs are shown as
+// text, everything else as hex; split into <=800-char lines (logcat truncates ~4 KB).
+void log_full_payload(MetaConn& m, std::uint8_t type, const std::string& p) {
+    static const char* H = "0123456789abcdef";
+    std::string out;
+    for (unsigned char b : p) {
+        if (b >= 0x20 && b < 0x7f && b != '\\') out.push_back(static_cast<char>(b));
+        else if (b == '\n') out += "\\n";
+        else { out += "\\x"; out.push_back(H[b >> 4]); out.push_back(H[b & 0xf]); }
+    }
+    const std::size_t kChunk = 800;
+    std::size_t parts = (out.size() + kChunk - 1) / kChunk;
+    for (std::size_t i = 0; i < parts; ++i)
+        logi("meta#%d ts-full 0x%02x len=%zu part %zu/%zu: %s", m.id(), type, p.size(), i + 1, parts,
+             out.substr(i * kChunk, kChunk).c_str());
+}
+
 const char* ts_name(std::uint8_t t) {
     // Client->server meta frames (docs/research/02 §17). None of the post-login ones
     // expects a reply: each builder only serialises + sends (verified per builder).
@@ -478,6 +496,7 @@ void serve_meta_conn(ServerContext& ctx, Conn& c, const std::string& peer) {
         { std::lock_guard<std::mutex> g(ctx.anubis.mu); ++ctx.anubis.frames_in; }
         logi("meta#%d +%ldms ts <- type=0x%02x %s len=%zu [%s]", m.id(), m.ms(), type, ts_name(type),
              payload.size(), hexpre(payload).c_str());
+        if (payload.size() > 48) log_full_payload(m, type, payload);
 
         if (!burst_sent) {
             if (type == 0x01) {
