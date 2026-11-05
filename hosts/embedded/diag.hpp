@@ -13,6 +13,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace mc5 {
 namespace diag {
@@ -28,6 +29,14 @@ std::string data_dir();
 
 // Timestamped "[boot +Nms] <stage>" marker (monotonic from the first init()).
 void boot_trace(const char* stage);
+
+// Remove <files>/bald/ trees that contain the empty DLC map (or its toc) an earlier
+// offline build served: with it BALD becomes "ready" with no DLC entry and the menu
+// query 0xa1cf38 -> 0xb63620 reads entry -1 of an empty list (SIGSEGV at 0xb63614).
+// Trees without our marker (e.g. real online-era DLC) are left alone.
+void remove_offline_bald_cache();
+// Same over explicit directories (host-testable). Returns the number of trees removed.
+int remove_offline_bald_cache_in(const std::vector<std::string>& dirs);
 
 // List every thread (tid, name, scheduler state) to the log. Not for use from a
 // signal handler — call it from normal context (startup, watchdog, on request).

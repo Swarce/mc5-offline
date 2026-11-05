@@ -1,5 +1,6 @@
 // Unit tests for the offline save (profile.cpp), the TS codec, LZ4, and the BALD
 // asset replies. Formats: docs/research/04-progression.md.
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -333,6 +334,28 @@ int main() {
         if (std::system(cmd.c_str()) != 0) std::fprintf(stderr, "cleanup failed\n");
     }
 
+    // --- settings migration: a v1 file's bald.serve=true (old default) is dropped ---
+    {
+        const std::string d3 = tmpdir();
+        CHECK(mc5::store::mkdirs(d3));
+        CHECK(mc5::store::save_atomic(d3 + "/settings.json",
+                                      "{\"bald\":{\"serve\":true},\"economy\":{\"startGold\":5}}"));
+        mc5::Progress pr;
+        pr.open(d3);
+        CHECK(!pr.settings()["bald"]["serve"].as_bool(true));
+        CHECK_EQ(pr.settings()["economy"]["startGold"].as_int(), 5); // real choices kept
+        Json disk;
+        CHECK(mc5::store::load_json(d3 + "/settings.json", disk));
+        CHECK_EQ(disk["settingsVersion"].as_int(), 2);
+        // A v2 file keeps an explicit bald.serve=true.
+        CHECK(mc5::store::save_atomic(d3 + "/settings.json", "{\"settingsVersion\":2,\"bald\":{\"serve\":true}}"));
+        mc5::Progress p2;
+        p2.open(d3);
+        CHECK(p2.settings()["bald"]["serve"].as_bool(false));
+        std::string cmd = "rm -rf '" + d3.substr(0, d3.rfind('/')) + "'";
+        if (std::system(cmd.c_str()) != 0) std::fprintf(stderr, "cleanup failed\n");
+    }
+
     // --- 0x46 for one oversized batch ---
     {
         Json inv = Json::object();
@@ -350,7 +373,29 @@ int main() {
         mc5::Router router;
         mc5::ServerContext ctx;
         ctx.progress.open(dir);
+        {   // Default: BALD is NOT served (the empty map crashed the menu on device); the
+            // 404 is held for bald.holdMs. Use a short hold here.
+            Json st;
+            CHECK(mc5::store::load_json(dir + "/settings.json", st));
+            CHECK(!st["bald"]["serve"].as_bool(true));
+        }
         mc5::register_services(router, ctx);
+        auto get0 = [&](const std::string& path) {
+            mc5::Request rq;
+            rq.method = "GET";
+            rq.path = path;
+            return router.route(rq);
+        };
+        {
+            CHECK(mc5::store::save_atomic(dir + "/settings.json", "{\"settingsVersion\":2,\"bald\":{\"serve\":false,\"holdMs\":50}}"));
+            ctx.progress.open(dir);
+            auto t0 = std::chrono::steady_clock::now();
+            mc5::Response off = get0("/asset//assets/1924:56128:6.0.12a:android:googleplay/bald_android_astc_h___index");
+            CHECK_EQ(off.status, 404);
+            CHECK(std::chrono::steady_clock::now() - t0 >= std::chrono::milliseconds(45));
+            CHECK(mc5::store::save_atomic(dir + "/settings.json", "{\"settingsVersion\":2,\"bald\":{\"serve\":true}}"));
+            ctx.progress.open(dir);
+        }
         auto get = [&](const std::string& path) {
             mc5::Request rq;
             rq.method = "GET";

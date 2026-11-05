@@ -8,10 +8,12 @@
 // signal after the handler chained through.
 #include "hosts/embedded/diag.hpp"
 
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <csignal>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -59,6 +61,25 @@ int main() {
     CHECK(out.find("#0") != std::string::npos);
     CHECK(out.find("pc=0x") != std::string::npos);
     CHECK(out.find("end backtrace") != std::string::npos);
+
+    // BALD cache cleanup removes only trees holding our empty DLC map / toc.
+    {
+        char t[] = "/tmp/mc5baldXXXXXX";
+        std::string root = mkdtemp(t);
+        auto put = [](const std::string& p, const std::string& c) { FILE* f = std::fopen(p.c_str(), "w"); std::fputs(c.c_str(), f); std::fclose(f); };
+        std::string ours = root + "/ours", real = root + "/real";
+        mkdir(ours.c_str(), 0700); mkdir((ours + "/sub").c_str(), 0700); mkdir(real.c_str(), 0700);
+        put(ours + "/bald___index___.txt", "1");
+        put(ours + "/sub/bald_android_astc_h_map_android_dlc_1", "<dlc/>");
+        put(real + "/bald___index___.txt", "7");
+        put(real + "/pack_01.dlc", "real dlc content");
+        CHECK(mc5::diag::remove_offline_bald_cache_in({ours, real, root + "/missing"}) == 1);
+        struct stat st;
+        CHECK(stat(ours.c_str(), &st) != 0);                       // ours: gone
+        CHECK(stat((real + "/pack_01.dlc").c_str(), &st) == 0);     // real DLC: kept
+        std::string cmd = "rm -rf '" + root + "'";
+        if (std::system(cmd.c_str()) != 0) std::fprintf(stderr, "cleanup failed\n");
+    }
 
     if (mc5test::failures() == 0) std::fprintf(stderr, "test_diag: OK\n");
     return mc5test::failures();

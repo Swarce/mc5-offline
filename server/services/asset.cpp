@@ -42,6 +42,10 @@
 
 #include "services.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+
 #include "../core/http.hpp"
 #include "../core/log.hpp"
 
@@ -84,8 +88,14 @@ const char* kBehavioralJson =
 // BALD "ready" with a NULL lookup -> SIGSEGV at 0x4 (G:0xc64570). So serve the three
 // terminal assets: index "1", a toc listing one asset (the empty DLC map), and the map
 // itself, "<dlc/>" (6 bytes, self-authored; md5 04ec0d2d9673bcf019d62fdc9f3e6e09).
-// The DLC state then parks with no packs; later boots fetch the index every 30 min.
-// Guarded: if the app dies soon after we first serve the map, twice, serving stops.
+// DEVICE ROUND adee827 DISPROVED THIS. The empty map makes the DLC wrapper's load
+// routine 0xb62430 set +0x9c ("ready") while +0x94 (the current DLC entry, assigned
+// only when an entry matches the expected name at 0x1bb2990) stays -1. The menu query
+// 0xa1cf38 -> 0xb63620 then indexes entry -1 of the empty +0x10 vector (0x38 each):
+// SIGSEGV at 0xb63614 (ldrb [x0,#0x19], x0 = -0x38) a few seconds into the menu. So
+// serving is now OFF by default (settings bald.serve) and the 404 is held instead;
+// the bootstrap removes the cached empty map (diag::remove_offline_bald_cache).
+// Guarded when on: if the app dies soon after any BALD success, twice, serving stops.
 static bool bald_name(const std::string& name, std::string& n, std::string& rest) {
     static const char* kNames[] = {"android_astc_h", "android_astc_l", "android_etc_h", "android_etc_l"};
     if (name.compare(0, 5, "bald_") != 0) return false;
@@ -103,6 +113,7 @@ static Response bald_asset(ServerContext& ctx, const Request& req, const std::st
         r.content_type = "application/octet-stream";
         return r;
     };
+    ctx.progress.guard_arm("bald", 60); // any BALD success can lead to "ready"
     if (rest == "___index") {
         logi("asset: BALD %s index -> 200 \"1\"%s%s", n.c_str(), range.empty() ? "" : " range=", range.c_str());
         return bin("1");
@@ -116,7 +127,6 @@ static Response bald_asset(ServerContext& ctx, const Request& req, const std::st
         return bin(toc);
     }
     if (rest == "_map_android_dlc_1") {
-        ctx.progress.guard_arm("bald", 60);
         logi("asset: BALD %s map -> 200 \"<dlc/>\"%s%s", n.c_str(), range.empty() ? "" : " range=", range.c_str());
         return bin("<dlc/>");
     }
@@ -144,8 +154,22 @@ void register_asset(Router& router, ServerContext& ctx) {
     router.add("*", "assets/{clientId}/{name}", [&ctx](const Request& req) {
         std::string n, rest;
         if (bald_name(req.param("name"), n, rest)) {
-            bool on = ctx.progress.settings()["bald"]["serve"].as_bool(true) && ctx.progress.guard_allowed("bald");
-            if (on) return bald_asset(ctx, req, n, rest);
+            Json b = ctx.progress.settings()["bald"];
+            if (b["serve"].as_bool(false) && ctx.progress.guard_allowed("bald")) return bald_asset(ctx, req, n, rest);
+            // Default: 404, as before M2 (BALD never becomes ready). The worker retries any
+            // failure ~21 ms later; holding the answer slows that from ~38/s to one per
+            // holdMs. The GET is synchronous on BALD's own worker thread (other requests
+            // interleave freely during the storm), so nothing else waits on it.
+            long hold = static_cast<long>(b["holdMs"].as_int(2000));
+            if (hold > 0 && hold <= 10000) std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+            static std::atomic<long> n404{0};
+            long k = ++n404;
+            if (k == 1 || k % 100 == 0)
+                logi("asset: BALD %s -> 404 after %ld ms hold (#%ld; settings bald.serve=false)",
+                     req.param("name").c_str(), hold, k);
+            Response r = Response::json("", 404);
+            r.content_type = "text/plain";
+            return r;
         }
         return asset_absent(req);
     });

@@ -431,6 +431,76 @@ void rm_caches_in(const std::string& dir, int depth, int& budget) {
 }
 #endif
 
+// True if `p` is a small regular file we authored for BALD: the 6-byte "<dlc/>" map or
+// a toc naming our "map_android_dlc_1" asset.
+bool is_our_bald_file(const std::string& p) {
+    struct stat st;
+    if (stat(p.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > 4096) return false;
+    FILE* f = std::fopen(p.c_str(), "re");
+    if (!f) return false;
+    char buf[4097];
+    std::size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    buf[n] = 0;
+    std::string c(buf, n);
+    return c == "<dlc/>" || c.find("map_android_dlc_1") != std::string::npos;
+}
+bool tree_has_marker(const std::string& dir, int depth) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) return false;
+    bool found = false;
+    struct dirent* e;
+    while (!found && (e = readdir(d)) != nullptr) {
+        std::string n = e->d_name;
+        if (n == "." || n == "..") continue;
+        std::string p = dir + "/" + n;
+        struct stat st;
+        if (stat(p.c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) { if (depth > 0) found = tree_has_marker(p, depth - 1); }
+        else found = is_our_bald_file(p);
+    }
+    closedir(d);
+    return found;
+}
+void rm_tree(const std::string& dir, int depth) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) return;
+    struct dirent* e;
+    std::vector<std::string> sub;
+    while ((e = readdir(d)) != nullptr) {
+        std::string n = e->d_name;
+        if (n == "." || n == "..") continue;
+        std::string p = dir + "/" + n;
+        struct stat st;
+        if (lstat(p.c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) { if (depth > 0) sub.push_back(p); }
+        else if (unlink(p.c_str()) == 0) logi("[diag] removed offline BALD file: %s", p.c_str());
+    }
+    closedir(d);
+    for (const auto& s2 : sub) rm_tree(s2, depth - 1);
+    rmdir(dir.c_str());
+}
+
+int remove_offline_bald_cache_in(const std::vector<std::string>& dirs) {
+    int removed = 0;
+    for (const std::string& d : dirs) {
+        if (!tree_has_marker(d, 2)) continue;
+        logw("[diag] %s holds the empty DLC map an earlier build served; removing it (BALD then "
+             "never becomes ready, as before)", d.c_str());
+        rm_tree(d, 2);
+        ++removed;
+    }
+    return removed;
+}
+
+void remove_offline_bald_cache() {
+#if defined(__ANDROID__)
+    const char* kPkg = "com.gameloft.android.ANMP.GloftM5HM";
+    remove_offline_bald_cache_in({std::string("/sdcard/Android/data/") + kPkg + "/files/bald",
+                                  std::string("/data/data/") + kPkg + "/files/bald"});
+#endif
+}
+
 // Delete the client's persisted federation/IRIS URL caches (fed_links.bin,
 // *_cache.bin) so the game re-discovers from our CURRENT eve/pandora responses
 // instead of replaying a URL cached by an earlier build. Fixes the stale

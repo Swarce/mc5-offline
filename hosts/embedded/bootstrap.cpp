@@ -66,6 +66,7 @@ void start_locked(const std::string& data_dir) {
         if (!base.empty() && base.back() == '/') base.pop_back();
         g_ctx->progress.open(base.empty() ? std::string() : base + "/MC5Offline");
         mc5::diag::boot_trace("save loaded");
+        if (!g_ctx->progress.settings()["bald"]["serve"].as_bool(false)) mc5::diag::remove_offline_bald_cache();
     }
 
     mc5::ServerConfig cfg;

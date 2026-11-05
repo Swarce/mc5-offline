@@ -15,7 +15,12 @@ namespace mc5 {
 
 namespace {
 
+// settingsVersion 2: "bald.serve" defaults to false (the empty DLC map crashed the menu,
+// device round adee827). A settings.json written by version 1 carried the old default
+// "serve":true, which is not a player's choice, so it is migrated (dropped) on load.
+constexpr long long kSettingsVersion = 2;
 const char* kDefaultSettings = R"JSON({
+ "settingsVersion":2,
  "redeem":{"enabled":true,"codes":{},"popup":"auto"},
  "unlockAll":false,
  "unlocks":{"batchSize":400,"batchDelayMs":250,"startDelaySeconds":10,"live":true},
@@ -23,7 +28,7 @@ const char* kDefaultSettings = R"JSON({
             "codeCredits":1000000,"codeGold":100000,"purchases":"none"},
  "profile":{"send":true},
  "config":{"sendGame":true},
- "bald":{"serve":true}
+ "bald":{"serve":false,"holdMs":2000}
 })JSON";
 
 constexpr long long kCurrencyCap = 2000000000LL;
@@ -241,11 +246,20 @@ void Progress::load_locked() {
         Json user;
         bool found = false;
         if (store::load_json(dir_ + "/settings.json", user, &found)) {
+            long long ver = user["settingsVersion"].as_int(1);
+            bool migrate = ver < kSettingsVersion;
+            if (ver < 2) user.erase("bald"); // v1 wrote the old default bald.serve=true
             // MCVS aliases: assets.couponsEnabled / assets.coupons.
             const Json& assets = user["assets"];
             if (assets["couponsEnabled"].is_bool()) settings_["redeem"]["enabled"] = assets["couponsEnabled"];
             if (assets["coupons"].is_object()) settings_["redeem"]["codes"] = assets["coupons"];
             merge_into(settings_, user);
+            if (migrate) {
+                settings_["settingsVersion"] = kSettingsVersion;
+                store::save_atomic(dir_ + "/settings.json", settings_.dump());
+                logi("[progress] settings.json migrated v%lld -> v%lld (bald.serve now %s)", ver, kSettingsVersion,
+                     settings_["bald"]["serve"].as_bool(false) ? "true" : "false");
+            }
         } else if (!found) {
             store::save_atomic(dir_ + "/settings.json", settings_.dump());
             logi("[progress] wrote default %s/settings.json", dir_.c_str());

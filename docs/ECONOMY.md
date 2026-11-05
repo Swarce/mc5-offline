@@ -133,6 +133,7 @@ Created with these defaults on first launch. Unknown keys are ignored. MCVS name
 
 ```json
 {
+ "settingsVersion":2,
  "redeem":{"enabled":true,"codes":{},"popup":"auto"},
  "unlockAll":false,
  "unlocks":{"batchSize":400,"batchDelayMs":250,"startDelaySeconds":10,"live":true},
@@ -140,7 +141,7 @@ Created with these defaults on first launch. Unknown keys are ignored. MCVS name
             "codeCredits":1000000,"codeGold":100000,"purchases":"none"},
  "profile":{"send":true},
  "config":{"sendGame":true},
- "bald":{"serve":true}
+ "bald":{"serve":false,"holdMs":2000}
 }
 ```
 
@@ -157,14 +158,14 @@ Created with these defaults on first launch. Unknown keys are ignored. MCVS name
 | `economy.codeCredits` / `codeGold` | what `UNLOCKCURRENCY` adds |
 | `profile.send` | `false`: never send the save at login (every launch is a fresh account; the save is still recorded) |
 | `config.sendGame` | `false`: send the old empty game config (brings back the Profile → stats crash, unless the guard patch is on) |
-| `bald.serve` | `false`: answer the DLC manager with 404 again (it then retries forever, about 40 requests a second) |
+| `bald.serve` | default `false`: the DLC manager gets a 404 held for `bald.holdMs` ms (about one request every 2 s instead of ~40 a second). `true` serves an empty DLC map, which **crashed the menu** on device (research/02 §20); leave it off |
 
 The environment variable `MC5_TS_PROFILE=0` also disables the login profile.
 
 ## 5. Crash guards
 
-Two new behaviours have never run on a device before: the login profile apply, and the DLC manager becoming "ready"
-on our toc. Each one is guarded:
+Two behaviours are guarded: the login profile apply (confirmed working on device), and the DLC manager becoming
+"ready" (off by default since it crashed the menu). Each guard works like this:
 
 * Before it starts, the guard is written to `state.json` → `guards`.
 * It is cleared once the game is clearly still alive: back in the menu or in a mission, or 20 s (profile) / 60 s

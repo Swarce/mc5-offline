@@ -495,7 +495,7 @@ Logging:
 | Login profile | 0x03 ≤ 65,528 B, else 0x27 with our own LZ4 (hash-chain matcher; ~12× on item JSON) | adds a **crash guard**: armed on send, confirmed by 0x10/0x24 or 20 s alive; two unconfirmed launches disable it |
 | Frames | 0x59, 0x0b, 0x10/0x2d, 0x11→0x12, 0xac, 0x24, 0x16 (op0-after-0x22 ignored), 0x17, 0x19, 0x1a, 0x32, 0xa3, 0x06→0x07, 0x21/0x96→0x22 | purchases (0x41…) are logged, not answered (`economy.purchases:"none"`); `missionCredits` not implemented |
 | 0x12 | `{"xp":X,"sp":Y}`, sent on every 0x11, applied to the save once per distinct payload | X = xp.rewards + xp.medals + xp.objectives, Y = sp.value (flat dotted keys or nested); to be confirmed by the device 0x11 dump |
-| BALD | index `1`, toc_1, `<dlc/>` map (`settings bald.serve`) | adds the "bald" crash guard (60 s) |
+| BALD | **off by default** since device round adee827 (02 §20): a 404 held for `bald.holdMs`; `bald.serve=true` serves index `1`, toc_1, `<dlc/>` map | the empty map crashes the menu (`0xb63614`); cached copies are removed at boot |
 | Codes | 0x53 → 0x45/0x46 grants (≤ 400 keys, currencies in their own frame) + 0x54 only for catalog items; `null` for invalid | adds `UNLOCKKILLSIGS`; a code whose item list is missing is reported invalid and **not consumed** |
 | Item lists | `hosts/embedded/item_dump.*` on the 0x53 / 0x16 builder hooks (game thread) | §10 |
 

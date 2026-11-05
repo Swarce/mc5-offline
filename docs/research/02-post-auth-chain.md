@@ -719,3 +719,32 @@ Full reference: [04-progression.md](04-progression.md). Player-facing: [../ECONO
 - `asset: BALD … index -> 200 "1"`, then toc, then map, and no storm.
 - Profile → stats opens.
 - `REDEEM 'UNLOCKCLASSES' -> OK` with an `0x45 inventory grant`.
+
+## 20. Device round adee827: the profile applies; serving BALD crashes the menu (2026-11-05)
+
+**What worked:**
+- The login burst carried TCP_Config `{"game":…}` and the stored TCP_Profile (0x03, 597 B).
+- The client acked it (0x74) and lived on: the `[guard] 'profile' confirmed` line appeared after 0x24.
+- The item dump ran on the game thread at the first 0x16 in 9.2 ms. It found:
+  - 260 base weapons
+  - 3127 weapon#attachment pairs
+  - 139 camos
+  - gear: 125 masks, 45 trinkets, 144 body pieces, 76 body camos
+  - 146 killsigs
+  - 9 classes
+
+  Every list passed its hash self-check.
+
+**The age gate was shown again.** That is expected here. The save came from the first launch of this build, which never completed a mission (`progress: []`, xp 0), so the client still runs the new-player flow (age gate → tutorial).
+
+**Crash.** SIGSEGV at `0xb63614` (`ldrb w0,[x0,#0x19]`, x0 = −0x38), about 7 s into the menu after the post-age-gate re-login.
+- **Call chain.** `0xa1cf38` (an AS3 native returning bool) → `0xb63620`. That function reads the DLC wrapper singleton at `.bss 0x1bc37d0` (the one `G:0xc61858` constructs): if `+0x9c` is set, it calls `0xb62fc0(obj, +0x94)`, which returns `[obj+0x10] + idx*0x38`. With idx = −1 on an empty vector, that is −0x38.
+- **Root cause.** The wrapper's map-load routine `0xb62430` sets `+0x94` only when a DLC entry's name equals the expected string at `0x1bb2990`, but sets `+0x9c = 1` unconditionally (`0xb62954`). Our empty `<dlc/>` map therefore leaves the wrapper "ready" with no entry.
+- **Why it hit on this launch.** Only the index was fetched, because the toc and map were cached in `files/bald/` from the first launch. The BALD guard was armed only when the map was served, so it never armed.
+
+**Fix (next build):**
+- `bald.serve` defaults to false. A `settings.json` written by v1 (which carried the old default `true`) is migrated via `settingsVersion` 2.
+- The 404 is held for `bald.holdMs` (2000 ms): ~0.5 requests/s instead of ~38/s. Other Gaia requests interleaved freely during the d86ee5c storm, so the synchronous BALD GET blocks only its own worker.
+- At boot, `diag::remove_offline_bald_cache()` deletes `files/bald/` trees that contain our `<dlc/>` map or a toc naming `map_android_dlc_1`. Trees without that marker (real DLC) are kept.
+- When serving is on, the guard now arms on any BALD success.
+- A real DLC map would need an entry matching `0x1bb2990`, or a patch to the `0xb63620` predicate. Neither is done.
