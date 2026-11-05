@@ -25,6 +25,14 @@ int apply_libmc5_http_patches(int http_port);
 // applied. arm64 only. See docs/patches.md.
 int apply_libmc5_tls_bypass();
 
+// Forces the Gaia login "connected" gate (FUN @ 0x707ec0, `return *(u8*)(this+0xEC)`)
+// to always return true, so the login FSM reaches its success terminal and fires
+// onLoginCompleted instead of diverting to the stuck state that triggers
+// popupConnectionLost + the ~1/s re-login loop. Overwrites only the first instruction
+// (ldrb -> mov w0,#1); 8-byte fingerprint-guarded. Returns 1 if applied. arm64 only.
+// See docs/research/02 §10.
+int apply_libmc5_connected_gate();
+
 // Diagnostic: replaces the Gaia "[IRISCfgProvider]" logger (a no-op in the shipped
 // release build, since its sink is null) with a trampoline that tees each discovery
 // message to logcat, so the game reports its own boot/discovery trace ("Getting

@@ -78,6 +78,20 @@ const unsigned char kAsioVerifyAccept[8] = {0x20, 0x00, 0x80, 0x52,  // mov w0, 
                                             0xc0, 0x03, 0x5f, 0xd6}; // ret
 constexpr uintptr_t kAsioVerifyVaddr = 0x1252c70;
 
+// The Gaia login "connected" gate: FUN @ 0x707ec0 = { return *(u8*)(this+0xEC); }.
+// The login FSM's state-8 handler advances to the success terminal (state 9 ->
+// onLoginCompleted) only when this returns non-zero; otherwise it diverts to the stuck
+// state 11 and the Lua UI shows popupConnectionLost and re-logs-in ~1/s. The flag is set
+// by a connection-state callback (0xb00508) that fires on a signal our loopback never
+// delivers (not the alert stream). Since the game SHOULD believe it is online in our
+// offline reimplementation, we force the gate true. Only the first instruction is
+// overwritten (ldrb -> mov w0,#1); the trailing ret is kept. 8-byte fingerprint-guarded.
+// See docs/research/02 §10.
+constexpr uintptr_t kConnGateVaddr = 0x707ec0;
+const unsigned char kConnGateFp[8] = {0x00, 0xb0, 0x43, 0x39,  // ldrb w0, [x0, #0xec]
+                                      0xc0, 0x03, 0x5f, 0xd6}; // ret
+const unsigned char kConnGatePatch[4] = {0x20, 0x00, 0x80, 0x52}; // mov w0, #1
+
 bool set_prot(void* addr, std::size_t len, int prot) {
     long ps = sysconf(_SC_PAGESIZE);
     uintptr_t start = reinterpret_cast<uintptr_t>(addr) & ~(static_cast<uintptr_t>(ps) - 1);
@@ -332,6 +346,25 @@ int install_login_trace_hooks() {
     return n;
 }
 
+int apply_libmc5_connected_gate() {
+    uintptr_t base = so_base("libMC5.so");
+    if (base == 0) { logw("connected-gate: libMC5.so not loaded"); return 0; }
+    void* site = reinterpret_cast<void*>(base + kConnGateVaddr);
+    // Verify the full 2-instruction getter (ldrb;ret) before touching it.
+    if (std::memcmp(site, kConnGateFp, sizeof(kConnGateFp)) != 0) {
+        logw("connected-gate: fingerprint mismatch at %p (got %s) — refusing", site,
+             hexpre(reinterpret_cast<unsigned char*>(site), 8).c_str());
+        return 0;
+    }
+    // Overwrite only the ldrb (first 4 bytes) with `mov w0,#1`; keep the ret.
+    if (!set_prot(site, 4, PROT_READ | PROT_WRITE)) { loge("connected-gate: mprotect RW failed"); return 0; }
+    std::memcpy(site, kConnGatePatch, sizeof(kConnGatePatch));
+    set_prot(site, 4, PROT_READ | PROT_EXEC);
+    __builtin___clear_cache(reinterpret_cast<char*>(site), reinterpret_cast<char*>(site) + 4);
+    logi("connected-gate: login 'connected' check forced true at %p (ldrb -> mov w0,#1)", site);
+    return 1;
+}
+
 int apply_libmc5_tls_bypass() {
     // Resolve the exported callback by symbol (robust); fall back to vaddr+base.
     uintptr_t addr = 0;
@@ -359,6 +392,11 @@ int apply_libmc5_http_patches(int /*http_port*/) {
 
 int apply_libmc5_tls_bypass() {
     logw("tls-bypass: no asio verify offset for this ABI (arm64 only)");
+    return 0;
+}
+
+int apply_libmc5_connected_gate() {
+    logw("connected-gate: no offset for this ABI (arm64 only)");
     return 0;
 }
 
