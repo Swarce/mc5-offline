@@ -47,10 +47,12 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "../core/json.hpp"
 #include "../core/log.hpp"
 #include "../core/server.hpp" // Conn
+#include "ts_codec.hpp"
 
 namespace mc5 {
 
@@ -108,71 +110,9 @@ bool read_frame(Conn& c, std::string& buf, std::uint8_t& type, std::string& payl
     return true;
 }
 
-// --- write helpers (big-endian TS framing) ---
-void put_u16_be(std::string& s, std::uint16_t v) {
-    s.push_back(static_cast<char>((v >> 8) & 0xff));
-    s.push_back(static_cast<char>(v & 0xff));
-}
-void put_u32_be(std::string& s, std::uint32_t v) {
-    s.push_back(static_cast<char>((v >> 24) & 0xff));
-    s.push_back(static_cast<char>((v >> 16) & 0xff));
-    s.push_back(static_cast<char>((v >> 8) & 0xff));
-    s.push_back(static_cast<char>(v & 0xff));
-}
-
-// A literals-only LZ4 block: valid LZ4 that stores `data` uncompressed, so we need
-// no LZ4 compressor. (LZ4's last sequence is literals-only; the decoder copies the
-// literals and stops at end-of-input.)
-[[maybe_unused]] std::string lz4_store(const std::string& data) {
-    std::string o;
-    std::size_t n = data.size();
-    o.push_back(static_cast<char>((n < 15 ? n : 15) << 4));
-    if (n >= 15) {
-        std::size_t r = n - 15;
-        while (r >= 255) { o.push_back(static_cast<char>(255)); r -= 255; }
-        o.push_back(static_cast<char>(r));
-    }
-    o += data;
-    return o;
-}
-[[maybe_unused]] std::string lz4blob(const std::string& data) {
-    std::string block = lz4_store(data), o;
-    put_u32_be(o, static_cast<std::uint32_t>(block.size()));
-    o += block;
-    return o;
-}
-std::string blob32(const std::string& data) {
-    std::string o;
-    put_u32_be(o, static_cast<std::uint32_t>(data.size()));
-    o += data;
-    return o;
-}
-std::string ts_frame(std::uint8_t type, const std::string& payload) {
-    std::string o;
-    o.push_back(static_cast<char>(type));
-    put_u16_be(o, static_cast<std::uint16_t>(3 + payload.size()));
-    o += payload;
-    return o;
-}
-
-// A fresh-account profile: structural keys present (so nested loads don't null-deref)
-// but identity keys (created/alias/gender/birthdate) absent, so the client treats it
-// as a new player and shows the age/gender screen. Keys from 01-phase1b §2 (loader
-// G:0x6e1498). Refined from the device log.
-std::string default_profile(ServerContext& ctx) {
-    Json p = Json::object();
-    const char* zeros[] = {"credits", "rd_currency", "sp_difficulty", "rating",
-                           "rating_duel", "best_solo_rank", "best_squad_rank"};
-    for (const char* k : zeros) p[k] = 0;
-    const char* objs[] = {"statistics", "skill_use_time", "killsig", "season_awards",
-                          "event_league", "event_milestones", "ev_chapters", "m_progress",
-                          "m_challengesProgress", "inventory", "_inventory_shadow",
-                          "private_profile", "daily_reward", "br_daily_reward",
-                          "energy_event", "bpacks_vault", "zmb_achievments"};
-    for (const char* k : objs) p[k] = Json::object();
-    (void)ctx;
-    return p.dump();
-}
+// --- write helpers: server/services/ts_codec.hpp ---
+using ts::blob32;
+std::string ts_frame(std::uint8_t type, const std::string& payload) { return ts::frame(type, payload); }
 
 Json parse_action(const std::string& line) {
     Json j;
@@ -185,30 +125,18 @@ std::string jstr(const Json& j, const char* k) {
     return v.is_string() ? v.as_string() : std::string();
 }
 
-// Bounds-checked big-endian reader for client TS payloads.
-struct BeReader {
-    const std::string& d;
-    std::size_t p = 0;
-    bool ok = true;
-    explicit BeReader(const std::string& s) : d(s) {}
-    bool need(std::size_t n) { if (!ok || p + n > d.size()) ok = false; return ok; }
-    unsigned u8() { if (!need(1)) return 0; return static_cast<unsigned char>(d[p++]); }
-    unsigned long u32() {
-        if (!need(4)) return 0;
-        unsigned long v = 0;
-        for (int i = 0; i < 4; ++i) v = (v << 8) | static_cast<unsigned char>(d[p++]);
-        return v;
-    }
-    std::string str() {
-        if (!need(2)) return std::string();
-        std::size_t n = (static_cast<unsigned char>(d[p]) << 8) | static_cast<unsigned char>(d[p + 1]);
-        p += 2;
-        if (!need(n)) return std::string();
-        std::string s = d.substr(p, n);
-        p += n;
-        return s;
-    }
-};
+using BeReader = ts::Reader;
+
+// The two InitSettings fields the save needs: "identity" (the country, e.g. "CA")
+// and gate5a (1 = the client asks for its TCP_Profile).
+void init_fields(const std::string& pl, std::string& country, unsigned& gate5a) {
+    BeReader r(pl);
+    r.u8(); r.u8(); r.u32();
+    country = r.str();
+    for (int i = 0; i < 4; ++i) r.str();
+    gate5a = r.u8();
+    if (!r.ok) gate5a = 0;
+}
 
 // 0x01 ClientSendInitSettings (built by 0xc08008): every field, for the log.
 std::string decode_init_settings(const std::string& pl) {
@@ -234,14 +162,29 @@ std::string decode_init_settings(const std::string& pl) {
     return o;
 }
 
-// The 29-byte gate burst (see header).
-std::string gate_burst() {
+// The login burst (see header): 0x22, 0x3e TCP_Config, [TCP_Profile], 0x04, 0x4a,
+// in ONE write. TCP_Config must carry a "game" object: "{}" made the config parser
+// 0x607270 return at 0x607388 before 0x614c78 sized the level-up-rewards table
+// (cfg+0x5f8), so Profile -> stats dereferenced NULL at 0x95e6ec (§19).
+std::string login_burst(const std::string& config, const std::string& profile_frame) {
     std::string o;
     o += ts_frame(0x22, "");                                      // b0, b2
-    o += ts_frame(0x3e, blob32("{}"));                            // b3 (TCP_Config, plain)
+    o += ts_frame(0x3e, blob32(config));                          // b3 (TCP_Config, plain)
+    o += profile_frame;                                           // 0x03/0x27 or nothing
     o += ts_frame(0x04, std::string(1, '\0') + blob32("[]"));     // b1 (TCP_Tournaments)
     o += ts_frame(0x4a, std::string(4, '\0'));                    // b4 (u32 n=0)
     return o;
+}
+
+std::string printable(const std::string& p) {
+    static const char* H = "0123456789abcdef";
+    std::string out;
+    for (unsigned char b : p) {
+        if (b >= 0x20 && b < 0x7f && b != '\\') out.push_back(static_cast<char>(b));
+        else if (b == '\n') out += "\\n";
+        else { out += "\\x"; out.push_back(H[b >> 4]); out.push_back(H[b & 0xf]); }
+    }
+    return out;
 }
 
 std::atomic<int> g_conn_seq{0};
@@ -284,6 +227,7 @@ public:
     bool send_frames(const std::string& bytes, const char* what, int nframes = 1) {
         logi("meta#%d +%ldms ts -> %s (%zu B) [%s]", id_, ms(), what, bytes.size(),
              hexpre(bytes, 32).c_str());
+        if (bytes.size() > 48) log_full_out(bytes);
         bool ok = send(bytes, what);
         if (ok) { std::lock_guard<std::mutex> g(ctx_.anubis.mu); ctx_.anubis.frames_out += nframes; }
         return ok;
@@ -297,6 +241,7 @@ public:
             while (!cv_.wait_for(lk, std::chrono::seconds(5), [this] { return stop_; })) {
                 lk.unlock();
                 bool ok = send(ka, "keepalive");
+                ctx_.progress.flush(); // debounced save + profile crash-guard confirmation
                 lk.lock();
                 if (!ok) break;
                 ++n;
@@ -309,15 +254,47 @@ public:
         { std::lock_guard<std::mutex> lk(cvm_); stop_ = true; }
         cv_.notify_all();
         if (ka_.joinable()) ka_.join();
+        for (auto& t : workers_) if (t.joinable()) t.join();
+        workers_.clear();
     }
+
+    // Sleeps up to ms; false if the connection is closing.
+    bool wait_ms(long ms) {
+        std::unique_lock<std::mutex> lk(cvm_);
+        return !cv_.wait_for(lk, std::chrono::milliseconds(ms), [this] { return stop_; });
+    }
+    // Runs fn on a worker thread (delayed pushes: unlock batches, unlockAll).
+    template <class F> void spawn(F fn) { workers_.emplace_back(std::move(fn)); }
 
     void finish(const char* why) {
         stop_keepalive();
+        ctx_.progress.flush(true);
         logi("meta#%d %s %s after %ldms, last phase '%s'", id_, peer_.c_str(), why, ms(), phase_.c_str());
         c_.close();
     }
 
     ServerContext& ctx() { return ctx_; }
+
+    // Every server->client frame over 48 bytes in full (burst, profile, 0x12, 0x45/0x46),
+    // one entry per frame, <=800-char parts, with the payload FNV for cross-checking.
+    void log_full_out(const std::string& bytes) {
+        std::size_t p = 0;
+        while (p + 3 <= bytes.size()) {
+            std::size_t len = (static_cast<unsigned char>(bytes[p + 1]) << 8) | static_cast<unsigned char>(bytes[p + 2]);
+            if (len < 3 || p + len > bytes.size()) break;
+            std::string pl = bytes.substr(p + 3, len - 3);
+            if (pl.size() > 48) {
+                std::string out = printable(pl);
+                const std::size_t kChunk = 800;
+                std::size_t parts = (out.size() + kChunk - 1) / kChunk;
+                for (std::size_t i = 0; i < parts; ++i)
+                    logi("meta#%d ts-out-full 0x%02x len=%zu fnv=%08x part %zu/%zu: %s", id_,
+                         static_cast<unsigned char>(bytes[p]), pl.size(), ts::fnv1a(pl), i + 1, parts,
+                         out.substr(i * kChunk, kChunk).c_str());
+            }
+            p += len;
+        }
+    }
 
 private:
     ServerContext& ctx_;
@@ -328,6 +305,7 @@ private:
     std::string phase_ = "accepted";
     std::mutex wmu_;
     std::thread ka_;
+    std::vector<std::thread> workers_;
     std::mutex cvm_;
     std::condition_variable cv_;
     bool stop_ = false;
@@ -373,13 +351,7 @@ bool handle_json_line(MetaConn& m, const std::string& line, bool& connected) {
 // them in full so a device run captures the exact formats. Printable runs are shown as
 // text, everything else as hex; split into <=800-char lines (logcat truncates ~4 KB).
 void log_full_payload(MetaConn& m, std::uint8_t type, const std::string& p) {
-    static const char* H = "0123456789abcdef";
-    std::string out;
-    for (unsigned char b : p) {
-        if (b >= 0x20 && b < 0x7f && b != '\\') out.push_back(static_cast<char>(b));
-        else if (b == '\n') out += "\\n";
-        else { out += "\\x"; out.push_back(H[b >> 4]); out.push_back(H[b & 0xf]); }
-    }
+    std::string out = printable(p);
     const std::size_t kChunk = 800;
     std::size_t parts = (out.size() + kChunk - 1) / kChunk;
     for (std::size_t i = 0; i < parts; ++i)
@@ -388,24 +360,37 @@ void log_full_payload(MetaConn& m, std::uint8_t type, const std::string& p) {
 }
 
 const char* ts_name(std::uint8_t t) {
-    // Client->server meta frames (docs/research/02 §17). None of the post-login ones
-    // expects a reply: each builder only serialises + sends (verified per builder).
+    // Client->server meta frames (docs/research/03-anubis-ts-spec.md; 04-progression.md).
     switch (t) {
         case 0x01: return "ClientSendInitSettings";
         case 0x05: return "login-cred(alt)";
+        case 0x06: return "lvc-request";
         case 0x0b: return "public-info";
-        case 0x16: return "ack-0x22";
+        case 0x10: return "mission-start";
+        case 0x11: return "mission-end";
+        case 0x16: return "loadout";
+        case 0x17: return "skill";
+        case 0x19: return "achievement";
+        case 0x1a: return "notification";
         case 0x21: return "profile-wait-timeout";
+        case 0x24: return "menu-return";
+        case 0x2d: return "mission-start(resend)";
+        case 0x32: return "menu-tutorials";
         case 0x34: return "tournaments-refresh";
+        case 0x41: case 0x42: case 0x44: case 0x48: case 0x4d: return "purchase";
         case 0x49: return "request-0x4a";
         case 0x50: return "login-cred";
         case 0x52: return "app-resume";
+        case 0x53: return "redeem-code";
         case 0x59: return "age-gender (AGE GATE OK)";
         case 0x5a: return "geo";
+        case 0x66: return "killsig-cond";
         case 0x69: return "0x69";
         case 0x74: return "profile-ack";
         case 0x96: return "reset-b0";
+        case 0xa3: return "difficulty";
         case 0xa8: return "restrictions-ok";
+        case 0xac: return "mission-fail-stats";
         case 0xad: return "consent";
         default:   return "?";
     }
@@ -444,6 +429,98 @@ void log_milestone(MetaConn& m, std::uint8_t type, const std::string& p) {
     }
 }
 
+// Sends a code's grant frames (0x45/0x46 batches, unlocks.batchDelayMs apart) and
+// the 0x54 reward reply. Runs on a MetaConn worker thread. The 0x54 must arrive
+// within 8 s of the 0x53 (0x79a490 checks now - [+0x138] >= 8001 ms), so if the
+// batches would take longer it goes first.
+void push_grants(MetaConn& m, const RedeemOutcome& o, bool reply = false) {
+    long delay = static_cast<long>(m.ctx().progress.settings()["unlocks"]["batchDelayMs"].as_int(250));
+    bool early = reply && static_cast<long>(o.frames.size()) * delay > 5000;
+    auto send54 = [&] {
+        if (!reply || o.reply54.empty()) return;
+        m.send_frames(ts_frame(0x54, ts::str16(o.reply54)), "0x54 redeem reward popup");
+    };
+    if (early) send54();
+    for (std::size_t i = 0; i < o.frames.size(); ++i) {
+        if (i && !m.wait_ms(delay)) return;
+        char what[64];
+        std::snprintf(what, sizeof(what), "0x%02x inventory grant %zu/%zu", static_cast<unsigned char>(o.frames[i][0]),
+                      i + 1, o.frames.size());
+        if (!m.send_frames(o.frames[i], what)) return;
+    }
+    if (!early) send54();
+}
+
+// Every client frame after the login burst.
+void handle_frame(MetaConn& m, std::uint8_t type, const std::string& p) {
+    Progress& pr = m.ctx().progress;
+    BeReader r(p);
+    switch (type) {
+        case 0x49: m.send_frames(ts_frame(0x4a, std::string(4, '\0')), "0x4a (reply to 0x49)"); break;
+        case 0x96:
+        case 0x21:
+            // 0x96 reset-b0 / 0x21 profile-wait timeout: restore b0 with 0x22. The
+            // client then sends 0x16 op0 with its pre-load loadout index (ignored).
+            if (type == 0x21) logw("meta#%d client reports a profile-wait timeout (0x21)", m.id());
+            m.send_frames(ts_frame(0x22, ""), type == 0x96 ? "0x22 (reply to 0x96, restores b0)"
+                                                            : "0x22 (reply to 0x21)");
+            pr.on_reset_b0();
+            break;
+        case 0x59: pr.on_age(be32(p, 0), be32(p, 4)); break;
+        case 0x0b: pr.on_public_info(r.str()); break;
+        case 0x10:
+        case 0x2d: pr.on_mission_start(r.str()); break;
+        case 0x06: {
+            // Level-data request [str lvcName, u32 cachedVer]: answer "no server copy"
+            // (07 u32 0 -> 0x831cb8, the local packs) instead of making the level
+            // loader wait its 15 s timeout (gate+0x40).
+            std::string lvc = r.str();
+            logi("meta#%d level data request '%s' cached=0x%08x -> 0x07 size 0 (use local data)", m.id(),
+                 lvc.c_str(), r.u32());
+            m.send_frames(ts_frame(0x07, std::string(4, '\0')), "0x07 (no server LVC)");
+            break;
+        }
+        case 0x11: {
+            // Mission end. The outcome controller waits (no timeout) for 0x12 [str JSON]
+            // before showing the stats screen; always reply, also to a duplicate.
+            std::string reply = pr.on_mission_end(p);
+            m.send_frames(ts_frame(0x12, ts::str16(reply)), "0x12 mission result");
+            break;
+        }
+        case 0xac: pr.on_mission_fail_stats(r.str()); break;
+        case 0x24: pr.on_menu_return(); break;
+        case 0x16: pr.on_loadout(p); break;
+        case 0x17: { unsigned a = r.u8(), b = r.u8(), c = r.u8(); if (r.ok) pr.on_skill(a, b, c); break; }
+        case 0x19: { std::uint32_t id = r.u32(), tier = r.u32(); unsigned s = r.u8(); if (r.ok) pr.on_achievement(id, tier, s); break; }
+        case 0x1a: pr.on_notification(p); break;
+        case 0x32: pr.on_menu_tutorials(p); break;
+        case 0xa3: if (!p.empty()) pr.on_difficulty(static_cast<unsigned char>(p[0])); break;
+        case 0x53: {
+            std::string code = r.str();
+            RedeemOutcome o = pr.redeem(code);
+            logi("meta#%d REDEEM '%s' -> %s: %s (%d items, +%lld credits, +%lld gold, %zu frames, popup %s)",
+                 m.id(), o.code.c_str(), o.valid ? "OK" : "INVALID", o.reason.c_str(), o.items, o.credits,
+                 o.gold, o.frames.size(), o.reply54.empty() ? "none" : o.reply54.c_str());
+            if (!o.valid) {
+                // "null" -> CPP_SEND_REDEEM_RESULT_INVALID (no catalog access).
+                m.send_frames(ts_frame(0x54, ts::str16("null")), "0x54 null (invalid code)");
+                break;
+            }
+            if (pr.in_mission()) {
+                logi("meta#%d redeem during a mission: the grant applies at the next launch", m.id());
+                break;
+            }
+            MetaConn* mp = &m;
+            m.spawn([mp, o] { push_grants(*mp, o, true); });
+            break;
+        }
+        case 0x41: case 0x42: case 0x44: case 0x48: case 0x4d:
+            logw("meta#%d purchase frame 0x%02x not served (settings economy.purchases='none')", m.id(), type);
+            break;
+        default: break; // 0x74 / 0x69 / 0x50 / 0x34 / 0x66 and the rest: logged above
+    }
+}
+
 } // namespace
 
 void serve_meta_conn(ServerContext& ctx, Conn& c, const std::string& peer) {
@@ -471,8 +548,8 @@ void serve_meta_conn(ServerContext& ctx, Conn& c, const std::string& peer) {
     m.phase("A:connect-game");
 
     // (B) TS binary: nothing is written until the client's first frame.
-    const bool with_profile = [] { const char* e = std::getenv("MC5_TS_PROFILE"); return e && e[0] == '1'; }();
     bool burst_sent = false;
+    bool unlock_all_armed = false;
     for (;;) {
         // An unexpected JSON line after "connect game" (the client re-using the
         // controller protocol) — answer it and keep going.
@@ -499,33 +576,57 @@ void serve_meta_conn(ServerContext& ctx, Conn& c, const std::string& peer) {
         if (payload.size() > 48) log_full_payload(m, type, payload);
 
         if (!burst_sent) {
+            std::string country;
+            unsigned gate5a = 0;
             if (type == 0x01) {
                 std::string d = decode_init_settings(payload);
                 logi("meta#%d InitSettings: %s", m.id(), d.c_str());
+                init_fields(payload, country, gate5a);
                 std::lock_guard<std::mutex> g(ctx.anubis.mu);
                 ctx.anubis.init_settings = d;
             } else {
                 logw("meta#%d first TS frame is 0x%02x, expected 0x01 — sending the burst anyway", m.id(), type);
             }
+            ctx.progress.on_init_settings(country, gate5a);
             m.phase("B:first-frame");
-            if (!m.send_frames(gate_burst(), "gate burst 0x22+0x3e+0x04+0x4a", 4)) { m.finish("write failed"); return; }
+            std::string why;
+            std::string prof = ctx.progress.login_profile_frame(gate5a, why);
+            const bool game_cfg = ctx.progress.settings()["config"]["sendGame"].as_bool(true);
+            const std::string cfg = game_cfg ? config_json() : std::string("{}");
+            logi("meta#%d login: TCP_Config %s; TCP_Profile %s (%s)", m.id(), cfg.c_str(),
+                 prof.empty() ? "not sent" : "SENT", why.c_str());
+            if (!m.send_frames(login_burst(cfg, prof),
+                               prof.empty() ? "login burst 0x22+0x3e+0x04+0x4a"
+                                            : "login burst 0x22+0x3e+PROFILE+0x04+0x4a",
+                               prof.empty() ? 4 : 5)) { m.finish("write failed"); return; }
+            ctx.progress.on_reset_b0();
             burst_sent = true;
-            m.phase("B:burst-sent");
-            if (with_profile) {
-                std::string prof = ts_frame(0x03, blob32(default_profile(ctx)));
-                if (prof.size() <= 0xFFFF) m.send_frames(prof, "0x03 TCP_Profile (MC5_TS_PROFILE=1)");
-                else logw("meta#%d profile frame too large (%zu B) — not sent", m.id(), prof.size());
-            }
+            m.phase(prof.empty() ? "B:burst-sent" : "B:burst+profile-sent");
             m.start_keepalive();
             if (type == 0x01) continue; // the 0x49 that follows is answered below
         }
 
         log_milestone(m, type, payload);
-        switch (type) {
-            case 0x49: m.send_frames(ts_frame(0x4a, std::string(4, '\0')), "0x4a (reply to 0x49)"); break;
-            case 0x96: m.send_frames(ts_frame(0x22, ""), "0x22 (reply to 0x96, restores b0)"); break;
-            case 0x21: logw("meta#%d client reports a profile-wait timeout (0x21)", m.id()); break;
-            default: break; // 0x16 / 0x74 / 0x69 and the rest: logged above
+        ctx.progress.after_login_frame(type);
+        handle_frame(m, type, payload);
+
+        // settings.unlockAll: once the menu is up (first 0x24/0x34), after a delay.
+        if (!unlock_all_armed && (type == 0x24 || type == 0x34) && ctx.progress.unlock_all_pending()) {
+            unlock_all_armed = true;
+            long delay = static_cast<long>(
+                ctx.progress.settings()["unlocks"]["startDelaySeconds"].as_int(10)) * 1000;
+            MetaConn* mp = &m;
+            m.spawn([mp, delay] {
+                if (!mp->wait_ms(delay)) return;
+                if (mp->ctx().progress.in_mission()) {
+                    logi("meta#%d unlockAll: in a mission; it applies at the next launch", mp->id());
+                    return;
+                }
+                RedeemOutcome o = mp->ctx().progress.unlock_all_once();
+                logi("meta#%d unlockAll: %s (%d items, %zu frames)", mp->id(), o.reason.c_str(), o.items,
+                     o.frames.size());
+                push_grants(*mp, o);
+            });
         }
     }
 }

@@ -48,6 +48,14 @@ void start_locked(const std::string& data_dir) {
     g_ctx->public_host = "127.0.0.1";
     g_ctx->port = 51780;
     g_ctx->scheme = "https";
+    // The player's save (profile/progression, redeemed codes, settings.json) lives
+    // next to the log copy: <files>/MC5Offline (pullable with adb on most devices).
+    {
+        std::string base = !data_dir.empty() ? data_dir : mc5::diag::data_dir();
+        if (!base.empty() && base.back() == '/') base.pop_back();
+        g_ctx->progress.open(base.empty() ? std::string() : base + "/MC5Offline");
+        mc5::diag::boot_trace("save loaded");
+    }
 
     mc5::ServerConfig cfg;
     cfg.bind = "127.0.0.1";

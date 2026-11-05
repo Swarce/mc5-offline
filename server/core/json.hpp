@@ -75,6 +75,13 @@ public:
         return false;
     }
     const std::vector<std::pair<std::string, Json>>& items() const { return members_; }
+    std::vector<std::pair<std::string, Json>>& items_mut() { return members_; }
+    bool erase(const std::string& key) {
+        if (type_ != Type::Object) return false;
+        for (auto it = members_.begin(); it != members_.end(); ++it)
+            if (it->first == key) { members_.erase(it); return true; }
+        return false;
+    }
 
     // Array access.
     void push_back(Json v) {
@@ -88,6 +95,9 @@ public:
     }
     const Json& at(std::size_t i) const { return elems_.at(i); }
     const std::vector<Json>& elements() const { return elems_; }
+    std::vector<Json>& elements_mut() { return elems_; }
+    bool is_bool() const { return type_ == Type::Bool; }
+    bool is_int() const { return type_ == Type::Int; }
 
     // --- serialization ---
     std::string dump() const {

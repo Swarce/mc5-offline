@@ -15,6 +15,7 @@
 
 #include "../core/http.hpp"
 #include "../core/sha1.hpp"
+#include "profile.hpp"
 
 namespace mc5 {
 
@@ -66,6 +67,10 @@ struct ServerContext {
     std::string scheme = "http";
 
     AccountStore accounts;
+
+    // The player's save + unlock codes (profile.hpp). The host calls
+    // progress.open("<files>/MC5Offline") before serving; unopened = in memory.
+    Progress progress;
 
     // Anubis / TS meta-channel progress, shared by the Federation-sessions handler
     // (matchmaker.cpp) and the meta connection handler (meta.cpp); surfaced on

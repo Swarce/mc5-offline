@@ -58,6 +58,7 @@ void register_core(Router& router, ServerContext& ctx) {
             a["init_settings"] = ctx.anubis.init_settings;
             o["anubis"] = std::move(a);
         }
+        o["progress"] = ctx.progress.status();
         return Response::json(o.dump());
     });
 

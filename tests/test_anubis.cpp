@@ -285,10 +285,13 @@ int main() {
     std::string out = frame(0x01, init) + frame(0x49, "");
     CHECK(::send(cl, out.data(), out.size(), 0) == static_cast<long>(out.size()));
 
+    // Login burst (§19): TCP_Config carries {"game":{"_level_up_rewards":[{}]}} (35 B);
+    // no TCP_Profile on a first run (gate5a=0 here, and nothing stored).
     std::string burst;
-    CHECK(read_exact(cl, burst, 29));
+    CHECK(read_exact(cl, burst, 62));
     CHECK_EQ(hex(burst), std::string("220003"
-                                     "3e000900000002" "7b7d"
+                                     "3e002a00000023"
+                                     "7b2267616d65223a7b225f6c6576656c5f75705f72657761726473223a5b7b7d5d7d7d"
                                      "04000a00" "00000002" "5b5d"
                                      "4a000700000000"));
     std::string r4a;
@@ -325,6 +328,45 @@ int main() {
         std::string again;
         CHECK(read_exact(cl, again, 3));
         CHECK_EQ(hex(again), std::string("220003"));
+    }
+
+    // Frames that need a reply (docs/research/04-progression.md).
+    {
+        set_timeout(cl, 3000);
+        // 0x06 level-data request -> 0x07 u32 0 (no server copy; local packs).
+        std::string f06 = frame(0x06, str16("Story_01.lvc") + std::string("\xff\xff\xff\xff", 4));
+        CHECK(::send(cl, f06.data(), f06.size(), 0) == static_cast<long>(f06.size()));
+        std::string r07;
+        CHECK(read_exact(cl, r07, 7));
+        CHECK_EQ(hex(r07), std::string("07000700000000"));
+        // 0x10 mission start, then 0x11 mission end -> 0x12 [str {"xp":..,"sp":..}].
+        std::string f10 = frame(0x10, str16("{\"level\":\"Venice_01_Intro\",\"node\":363515348}\n"));
+        std::string body = str16("0:1:1:") + str16("{\"xp.rewards\":120,\"sp.value\":3}") + std::string(4, '\0');
+        std::string f11 = frame(0x11, body);
+        std::string both = f10 + f11;
+        CHECK(::send(cl, both.data(), both.size(), 0) == static_cast<long>(both.size()));
+        std::string h12;
+        CHECK(read_exact(cl, h12, 3));
+        CHECK_EQ(static_cast<unsigned char>(h12[0]), 0x12);
+        std::size_t len12 = (static_cast<unsigned char>(h12[1]) << 8) | static_cast<unsigned char>(h12[2]);
+        std::string p12;
+        CHECK(read_exact(cl, p12, len12 - 3));
+        CHECK_EQ(p12.substr(2), std::string("{\"xp\":120,\"sp\":3}"));
+        // 0x53 redeem: a valid code -> one 0x45 grant; the same code again -> 0x54 "null".
+        std::string f53 = frame(0x53, str16("unlockcurrency"));
+        CHECK(::send(cl, f53.data(), f53.size(), 0) == static_cast<long>(f53.size()));
+        std::string h45;
+        CHECK(read_exact(cl, h45, 3));
+        CHECK_EQ(static_cast<unsigned char>(h45[0]), 0x45);
+        std::size_t len45 = (static_cast<unsigned char>(h45[1]) << 8) | static_cast<unsigned char>(h45[2]);
+        std::string p45;
+        CHECK(read_exact(cl, p45, len45 - 3));
+        CHECK(p45.substr(0, 16) == std::string(16, '\0'));
+        CHECK(p45.find("\"diamond_dust\":1000000") != std::string::npos);
+        CHECK(::send(cl, f53.data(), f53.size(), 0) == static_cast<long>(f53.size()));
+        std::string r54;
+        CHECK(read_exact(cl, r54, 9));
+        CHECK_EQ(hex(r54), std::string("5400090004") + hex("null"));
     }
 
     ::shutdown(cl, SHUT_RDWR);

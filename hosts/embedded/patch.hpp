@@ -74,4 +74,9 @@ int install_anubis_diag();
 // Returns the number of hooks installed. arm64 only. See docs/research/02 §17.
 int install_age_gate_diag();
 
+// Fingerprint-guarded rewrite of the level-up rewards accessor 0x628af8 so an
+// unsized table yields an empty range instead of NULL (the Profile->stats crash at
+// 0x95e6ec). Returns 1 if applied.
+int apply_levelup_rewards_guard();
+
 } // namespace mc5

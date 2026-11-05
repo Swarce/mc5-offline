@@ -454,12 +454,16 @@ void clear_stale_url_caches(const std::string& data_dir) {
 #endif
 }
 
+namespace { std::string g_data_dir; }
+std::string data_dir() { return g_data_dir; }
+
 void init(const std::string& data_dir) {
     bool expected = false;
     if (!g_inited.compare_exchange_strong(expected, true)) return;
     clock_gettime(CLOCK_MONOTONIC, &g_boot);
 
     std::string dir = open_log_copy(data_dir);
+    g_data_dir = dir;
     start_logcat_capture(dir);
     clear_stale_url_caches(data_dir);
     install_crash_handler();

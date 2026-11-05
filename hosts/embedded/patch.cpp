@@ -830,6 +830,42 @@ int apply_libmc5_connected_gate() {
     return 1;
 }
 
+// Level-up rewards accessor 0x628af8(cfg, level): returns &cfg->rewards[level] (a
+// vector<vector<{u32 item, i32 qty}>> at cfg+0x5f8, element 0x18), or the table's
+// begin for level <= 0 or out of range. The table is sized ONLY by the config parser
+// (0x614c78 from game["_level_up_rewards"]), so until a TCP_Config with "game" has
+// been applied begin == NULL and the three callers (Profile->stats 0x95cb20, level-up
+// popups 0x941738 / 0xa3e820) do `ldp x8,x9,[x0]` on NULL: the Profile->stats crash
+// at 0x95e6ec. The server now sends that config (meta.cpp); this patch is the
+// belt-and-braces: an EMPTY table returns &cfg->table itself ({NULL,NULL}), so the
+// callers' existing `cmp x9,x8; b.eq` skips the loop. Non-empty tables behave exactly
+// as before (level <= 0 still yields begin via the unsigned csel). 68 bytes, the whole
+// function, fingerprint-verified:
+//   ldr x9,[x0,#0x5f8] ; cbz x9,+0x38 ; <original body> ; add x0,x0,#0x5f8 ; ret
+constexpr uintptr_t kLevelUpRewardsVaddr = 0x628af8;
+const unsigned char kLevelUpRewardsFp[68] = {
+    0x3f, 0x00, 0x00, 0x71, 0xcd, 0x01, 0x00, 0x54, 0x08, 0x00, 0x43, 0xf9, 0xea, 0xf3, 0x01, 0xb2,
+    0x09, 0xfc, 0x42, 0xf9, 0x6a, 0x55, 0x95, 0xf2, 0xeb, 0x07, 0x1d, 0x32, 0x08, 0x01, 0x09, 0xcb,
+    0x2b, 0x24, 0x2b, 0x9b, 0x08, 0xfd, 0x43, 0x93, 0x08, 0x7d, 0x0a, 0x9b, 0x2a, 0x7c, 0x40, 0x93,
+    0x1f, 0x01, 0x0a, 0xeb, 0x60, 0x81, 0x89, 0x9a, 0xc0, 0x03, 0x5f, 0xd6, 0x00, 0xfc, 0x42, 0xf9,
+    0xc0, 0x03, 0x5f, 0xd6};
+const unsigned char kLevelUpRewardsPatch[68] = {
+    0x09, 0xfc, 0x42, 0xf9, 0xc9, 0x01, 0x00, 0xb4, 0x08, 0x00, 0x43, 0xf9, 0xea, 0xf3, 0x01, 0xb2,
+    0x09, 0xfc, 0x42, 0xf9, 0x6a, 0x55, 0x95, 0xf2, 0xeb, 0x07, 0x1d, 0x32, 0x08, 0x01, 0x09, 0xcb,
+    0x2b, 0x24, 0x2b, 0x9b, 0x08, 0xfd, 0x43, 0x93, 0x08, 0x7d, 0x0a, 0x9b, 0x2a, 0x7c, 0x40, 0x93,
+    0x1f, 0x01, 0x0a, 0xeb, 0x60, 0x81, 0x89, 0x9a, 0xc0, 0x03, 0x5f, 0xd6, 0x00, 0xe0, 0x17, 0x91,
+    0xc0, 0x03, 0x5f, 0xd6};
+
+int apply_levelup_rewards_guard() {
+    uintptr_t base = so_base("libMC5.so");
+    if (!base) { logw("levelup-rewards-guard: libMC5 base not found"); return 0; }
+    bool ok = patch_site("levelup-rewards-guard", base + kLevelUpRewardsVaddr, kLevelUpRewardsFp,
+                         kLevelUpRewardsPatch, sizeof(kLevelUpRewardsPatch), true);
+    if (ok) logi("levelup-rewards-guard: 0x628af8 returns an empty range for an unsized table "
+                 "(Profile->stats / level-up popups no longer dereference NULL)");
+    return ok ? 1 : 0;
+}
+
 int apply_libmc5_tls_bypass() {
     // Resolve the exported callback by symbol (robust); fall back to vaddr+base.
     uintptr_t addr = 0;
@@ -887,6 +923,11 @@ int install_anubis_diag() {
 
 int install_age_gate_diag() {
     logw("age-gate-diag: no offsets for this ABI (arm64 only)");
+    return 0;
+}
+
+int apply_levelup_rewards_guard() {
+    logw("levelup-rewards-guard: no offset for this ABI (arm64 only)");
     return 0;
 }
 

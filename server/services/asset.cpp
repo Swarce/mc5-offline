@@ -77,6 +77,55 @@ const char* kBehavioralJson =
 
 } // namespace
 
+// BALD (Gameloft's runtime-DLC manager, ctor G:0x136cfc8, name "android" + _astc|_etc
+// + _h|_l) GETs bald_<n>___index from a worker (G:0x1373a00) that retries ANY failure
+// every ~21 ms forever (no cap, no backoff, no status check): 404 caused 2680 GETs in
+// 70 s. A 200 "{}" only moves the storm to the toc, and a toc with no map entry makes
+// BALD "ready" with a NULL lookup -> SIGSEGV at 0x4 (G:0xc64570). So serve the three
+// terminal assets: index "1", a toc listing one asset (the empty DLC map), and the map
+// itself, "<dlc/>" (6 bytes, self-authored; md5 04ec0d2d9673bcf019d62fdc9f3e6e09).
+// The DLC state then parks with no packs; later boots fetch the index every 30 min.
+// Guarded: if the app dies soon after we first serve the map, twice, serving stops.
+static bool bald_name(const std::string& name, std::string& n, std::string& rest) {
+    static const char* kNames[] = {"android_astc_h", "android_astc_l", "android_etc_h", "android_etc_l"};
+    if (name.compare(0, 5, "bald_") != 0) return false;
+    for (const char* k : kNames) {
+        std::string pre = std::string("bald_") + k;
+        if (name.compare(0, pre.size(), pre) == 0) { n = k; rest = name.substr(pre.size()); return true; }
+    }
+    return false;
+}
+
+static Response bald_asset(ServerContext& ctx, const Request& req, const std::string& n, const std::string& rest) {
+    const std::string range = req.header("range");
+    auto bin = [](const std::string& body) {
+        Response r = Response::json(body, 200);
+        r.content_type = "application/octet-stream";
+        return r;
+    };
+    if (rest == "___index") {
+        logi("asset: BALD %s index -> 200 \"1\"%s%s", n.c_str(), range.empty() ? "" : " range=", range.c_str());
+        return bin("1");
+    }
+    if (rest == "__toc_1") {
+        std::string map = "bald_" + n + "_map_android_dlc_1";
+        std::string toc = "{\"hashes\":[{\"name\":\"" + map +
+                          "\",\"file_size\":6,\"chunk_size\":65536,\"hashes\":[\"04ec0d2d9673bcf019d62fdc9f3e6e09\"]}],"
+                          "\"toc\":[{\"_version\":\"6.0.12a\",\"assets\":[{\"name\":\"" + map + "\"}]}]}";
+        logi("asset: BALD %s toc_1 -> 200 (%zu B, one empty DLC map)", n.c_str(), toc.size());
+        return bin(toc);
+    }
+    if (rest == "_map_android_dlc_1") {
+        ctx.progress.guard_arm("bald", 60);
+        logi("asset: BALD %s map -> 200 \"<dlc/>\"%s%s", n.c_str(), range.empty() ? "" : " range=", range.c_str());
+        return bin("<dlc/>");
+    }
+    logw("asset: BALD %s unexpected '%s' -> 404 (this would retry forever)", n.c_str(), rest.c_str());
+    Response r = Response::json("", 404);
+    r.content_type = "text/plain";
+    return r;
+}
+
 static Response asset_absent(const Request& req) {
     logi("asset: %s '%s' -> 404 (absent; client keeps its bundled/default copy)",
          req.method.c_str(), req.param("name").c_str());
@@ -85,14 +134,21 @@ static Response asset_absent(const Request& req) {
     return r;
 }
 
-void register_asset(Router& router, ServerContext& /*ctx*/) {
+void register_asset(Router& router, ServerContext& ctx) {
     router.add("GET", "assets/{clientId}/compliancy.json",
                [](const Request&) { return Response::json(kCompliancyJson); });
     router.add("GET", "assets/{clientId}/behavioral.json",
                [](const Request&) { return Response::json(kBehavioralJson); });
     // Registered AFTER the two configs (first match wins): everything else is absent.
     // Method "*" covers the HEAD probes (server.cpp sends no body for HEAD).
-    router.add("*", "assets/{clientId}/{name}", asset_absent);
+    router.add("*", "assets/{clientId}/{name}", [&ctx](const Request& req) {
+        std::string n, rest;
+        if (bald_name(req.param("name"), n, rest)) {
+            bool on = ctx.progress.settings()["bald"]["serve"].as_bool(true) && ctx.progress.guard_allowed("bald");
+            if (on) return bald_asset(ctx, req, n, rest);
+        }
+        return asset_absent(req);
+    });
     router.add("*", "assets/{clientId}/{name}/metadata", asset_absent);
     router.add("*", "assets/{clientId}/{name}/metadata/hash", asset_absent);
 }

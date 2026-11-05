@@ -22,6 +22,10 @@ namespace diag {
 // call more than once; only the first call takes effect.
 void init(const std::string& data_dir);
 
+// The directory init() chose for the log copy ("" if none): the app's external files
+// dir when writable, else its internal files dir. The save lives under it.
+std::string data_dir();
+
 // Timestamped "[boot +Nms] <stage>" marker (monotonic from the first init()).
 void boot_trace(const char* stage);
 
