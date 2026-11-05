@@ -255,3 +255,35 @@ Round 4 (build `e8b6eb7`) hooks the FSM pump `0xbcdab0` and logs the state globa
 `0x1bc434c` on change (`fsm-state: N`) to pinpoint the stall state (map: state 5 =
 compliancy, 9 ≈ terminal). `SetState 0xbcd600` is unhookable (two leading adrp, 24-byte
 leaf), so the pump is traced instead.
+
+## 10. ROOT CAUSE: login "connected" gate (obj+0xEC) never set → popupConnectionLost
+
+Status: **[V]** on-device FSM trace (build `e8b6eb7`, log `efa072b7`) + static RE.
+
+Full FSM state sequence of a complete login cycle: `2→3→4→6→5→7→8→11` then rests at
+**state 11** idle (no re-login, no terminal callback) — the auth FSM finishes but login
+never reports success. Jump table @`0x15f92d0` confirmed; state 9 (`0xbcdf74`) is the
+SUCCESS terminal, state 11 (`0xbcdba8`) is the stuck rest state.
+
+The branch is in the **state-8 handler** (`0xbce054`):
+```
+bl 0x707ec0            ; gate(): return *(bool*)(gateObj+0xEC)
+tbz w0,#0,#0xbce3a0    ; if 0 -> branch B -> SetState(11)   [stuck]
+... fall through -> 0xbce0c4: mov w0,#9; SetState(9)        [success -> onLoginCompleted]
+```
+Gate `0x707ec0` = `ldrb w0,[x0,#0xec]; ret` (gateObj = `*(0x4e46a0() + 0x1b8)`). On our
+setup `+0xEC==0`, so login diverts to state 11 and the Lua dispatcher `0x8f4e40` shows
+**`popupConnectionLost`** (string `0x14812b1`) and re-calls `StartLogin` ~1/s.
+
+The flag is set by `0x707a90(obj, w1, w2)` (`+0xEC=1` iff `w1==0 && w2!=0`), called only
+by the event handler **`0xb00508`** when a connection message with `msg[0xe]==0 &&
+msg[0xf]!=0` arrives (msg fields: `+0xa` u16, `+0xc` s16, `+0xe` u8, `+0xf` u8). This is
+the server-pushed "online session established" event that real Gaia delivers and our
+loopback does not — so the flag never sets.
+
+**Fix chosen (user): server-side.** Deliver the connection event (expected: a real event
+on the alerts/me SSE stream, which is subscribed to alert_types incl. `connection`) so the
+client sets `+0xEC` itself. Next: pin the alert "connection" event wire format (SSE
+event name + data → the `msg[0xe]/0xf` fields) and emit it from `server/services/alert.cpp`.
+Gate getter `0x707ec0` has 8 callers (login FSM + ~7 online-state checks), so a patch
+would be broad; the event path sets the real flag consistently.
