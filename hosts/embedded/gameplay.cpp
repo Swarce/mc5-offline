@@ -52,7 +52,7 @@ void* g_pushed_st = nullptr;  // our MultiplayerStartLocalGame state (game threa
 int g_pushed_frames = 0;
 long g_dump_next_ms = 0;       // match-state diagnostic throttle (game thread only)
 int g_dump_left = 0;
-bool g_localfix_done = false;  // local player converted from host/spectator to participant
+std::atomic<int> g_bottick_n{0}; // how many times the bot-manager tick fired (diagnostic)
 // Bots for the running local match: re-asserted on every bot tick (game thread).
 std::atomic<int> g_bot_target{0};
 std::atomic<bool> g_local_active{false}; // a local match we started is (being) hosted
@@ -207,9 +207,8 @@ void start_bot_match_now(int bots) {
     g_last_bm.store(0);
     g_pushed_st = st;
     g_pushed_frames = 0;
-    g_dump_left = 15; // dump match state once/second for the first 15 s (diagnostic)
+    g_dump_left = 30; // dump match state once/second for the first 30 s (diagnostic)
     g_dump_next_ms = 0;
-    g_localfix_done = false;
     logi("[botmatch] local match state pushed (MP=0x%llx, top=%p); %d bots will be requested when the match's "
          "bot manager appears", static_cast<unsigned long long>(m), top, bots);
 }
@@ -476,8 +475,12 @@ void dump_match_state(uintptr_t MP) {
                         : nullptr;
     int ready = -1;
     if (so) { ready = reinterpret_cast<int (*)(void*, int)>(g_base + 0xa654f0)(reinterpret_cast<void*>(MP), lid) & 1; }
-    logi("[match] phase=%u localId=%d entry{state=%d team=%d slot=%d} soldier=%s ready=%d bots=%d",
-         phase, lid, st, team, slot, so ? "yes" : "no", ready, static_cast<int>(g_inj.size()));
+    int canstart = reinterpret_cast<int (*)(void*, int)>(g_base + 0xb083f8)(reinterpret_cast<void*>(MP), 0) & 1;
+    uintptr_t bm = 0; std::int32_t bm58 = -1;
+    if (rdv(MP + 0xb340, bm) && bm >= 0x1000) rdv(bm + 0x58, bm58);
+    logi("[match] c4=%u canStart=%d localId=%d entry{state=%d team=%d slot=%d} soldier=%s ready=%d bots=%d bm58=%d ticks=%d",
+         phase, canstart, lid, st, team, slot, so ? "yes" : "no", ready, static_cast<int>(g_inj.size()), bm58,
+         g_bottick_n.load());
     for (const auto& b : g_inj) {
         void* bso = reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa58a40)(reinterpret_cast<void*>(MP), b.id);
         int br = reinterpret_cast<int (*)(void*, int)>(g_base + 0xa654f0)(reinterpret_cast<void*>(MP), b.id) & 1;
@@ -485,34 +488,6 @@ void dump_match_state(uintptr_t MP) {
         if (bso) { int t = reinterpret_cast<int (*)(void*)>(g_base + 0x5bb930)(bso); bt = t; }
         logi("[match]   bot id=%d slot=%d soldier=%s ready=%d team=%d", b.id, b.slot, bso ? "yes" : "no", br, bt);
     }
-}
-
-// The host registers its own player with state 4 (ae3a70 -> AddPlayer state=4), which is
-// a spectator/host, not a spawning participant -- so the local view is the free host
-// camera (black / in the void) while the HUD draws and real players (bots) spawn and move.
-// Once the match is live and the local slot object exists, convert the local player into a
-// normal teamed participant (state 1, a team, ready) so the round spawns its soldier and
-// attaches the first-person camera, exactly as for a joined player. Guarded; runs once.
-void ensure_local_participant(uintptr_t MP) {
-    if (g_localfix_done || !g_bots_ok) return;
-    if (!authority_ok(MP)) return;
-    std::int32_t lid = -1;
-    if (!rdv(MP + 0x15d0, lid) || lid < 0 || lid > 0x7f) return;
-    void* ep = reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa62f58)(reinterpret_cast<void*>(MP), lid);
-    if (!ep) return;
-    uintptr_t e = reinterpret_cast<uintptr_t>(ep);
-    unsigned char st = 0;
-    if (!rdv(e + 0x1b, st)) return;
-    if (st != 4) { g_localfix_done = true; return; } // already a normal participant; nothing to do
-    void* so = reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa58a40)(reinterpret_cast<void*>(MP), lid);
-    if (!so) return; // slot object not created yet; retry next frame
-    *reinterpret_cast<volatile unsigned char*>(e + 0x1b) = 1; // state: playing
-    int team = reinterpret_cast<int (*)(void*, int)>(g_base + 0xaf1030)(reinterpret_cast<void*>(MP), lid); // ChooseTeam
-    reinterpret_cast<void (*)(void*, int)>(g_base + 0xaf1748)(so, team);                                   // apply team
-    *reinterpret_cast<volatile std::int32_t*>(reinterpret_cast<uintptr_t>(so) + 0x708) = 3;                // ready
-    reinterpret_cast<void (*)(void*)>(g_base + 0xaf3170)(reinterpret_cast<void*>(MP));                     // CanStart map
-    g_localfix_done = true;
-    logi("[match] local player: host entry state 4 -> 1, team=%d, marked ready (was the spectator host cam)", team);
 }
 
 // Mission start 0x799210 (MP branch looks the local player up by id): repair first.
@@ -634,11 +609,7 @@ extern "C" void mc5_pump_hook(const char*, unsigned long long, unsigned long lon
     if (g_local_active.load()) {
         repair_host_entry("frame");
         void* mp = reinterpret_cast<void* (*)()>(g_base + 0x4e2108)();
-        if (mp) {
-            try { ensure_local_participant(reinterpret_cast<uintptr_t>(mp)); }
-            catch (...) { logw("[match] exception making the local player a participant (ignored)"); }
-            dump_match_state(reinterpret_cast<uintptr_t>(mp));
-        }
+        if (mp) dump_match_state(reinterpret_cast<uintptr_t>(mp));
     }
     if (g_qp.active && g_qp.fire) {
         g_qp.active = false;
@@ -684,6 +655,7 @@ extern "C" void mc5_pump_hook(const char*, unsigned long long, unsigned long lon
 // (bots.bin), dereferenced by 0xb41a80 / 0xc42270: must be non-NULL.
 extern "C" void mc5_bot_tick_hook(const char*, unsigned long long x0, unsigned long long, unsigned long long,
                                   unsigned long long) {
+    g_bottick_n.fetch_add(1);
     int n = g_bot_target.load();
     if (n <= 0) return;
     uintptr_t bm = static_cast<uintptr_t>(x0);
