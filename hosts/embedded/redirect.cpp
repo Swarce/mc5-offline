@@ -129,6 +129,10 @@ void start_redirect_installer(int http_port, int tls_port, ItemSink item_sink) {
                 // Unlock-code item lists from the game's own armory (game thread).
                 if (item_sink) install_item_dump_hooks(item_sink);
                 diag::boot_trace("item dump hooks installed");
+                // Local-host match: make the host join as a real player (not the state-4
+                // spectator) so a hosted Quick Play match is playable, not a black view.
+                apply_libmc5_host_player_state();
+                diag::boot_trace("host-player state patch applied");
                 // Game-thread services: cheat bytes, zone table walk, local bot match.
                 gameplay::install();
                 diag::boot_trace("gameplay hooks installed");

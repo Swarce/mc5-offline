@@ -53,6 +53,7 @@ int g_pushed_frames = 0;
 long g_dump_next_ms = 0;       // match-state diagnostic throttle (game thread only)
 int g_dump_left = 0;
 std::atomic<int> g_bottick_n{0}; // how many times the bot-manager tick fired (diagnostic)
+std::vector<int> g_lo_done;      // participant ids whose loadout we've built (game thread only)
 // Bots for the running local match: re-asserted on every bot tick (game thread).
 std::atomic<int> g_bot_target{0};
 std::atomic<bool> g_local_active{false}; // a local match we started is (being) hosted
@@ -209,6 +210,7 @@ void start_bot_match_now(int bots) {
     g_pushed_frames = 0;
     g_dump_left = 30; // dump match state once/second for the first 30 s (diagnostic)
     g_dump_next_ms = 0;
+    g_lo_done.clear();
     logi("[botmatch] local match state pushed (MP=0x%llx, top=%p); %d bots will be requested when the match's "
          "bot manager appears", static_cast<unsigned long long>(m), top, bots);
 }
@@ -296,6 +298,7 @@ void repair_host_entry(const char* where) {
 std::atomic<bool> g_peerless{true}; // settings bots.peerless; false = legacy game fill
 bool g_bots_ok = false;             // every called function fingerprinted at install()
 bool g_sink_ok = false;             // the outgoing-stream ctor 0x8cff28 fingerprinted
+bool g_playable_ok = false;         // loadout-build functions fingerprinted (ensure_playable)
 uintptr_t g_inj_bm = 0;             // bot manager of the match we are filling (game thread)
 
 // Two "bit bucket" outgoing streams returned for bot slots by H1/H2. The writers bound
@@ -365,6 +368,18 @@ extern "C" int mc5_h4_e5(unsigned long long mp, unsigned long long msg, unsigned
             return 0;
         }
     }
+    return 0;
+}
+
+// H6 0x700ea0: returns a participant's current-weapon = loadout->vec[loadout->idx], but
+// derefs the loadout (x0) with no NULL check (ldp [x0+0x160]). The per-frame scoring/HUD
+// handler 0xa82ef8 calls it with *(soldier+0x4d0), which is NULL for any participant whose
+// loadout component was not built -> SIGSEGV at addr 0x160. Guard: for x0==NULL return
+// NULL; every caller already handles a NULL current-weapon (cbz x0). Safety net in case a
+// participant still reaches the scoring loop without a loadout.
+extern "C" int mc5_h6_loadout_guard(unsigned long long x0, unsigned long long, unsigned long long,
+                                    unsigned long long, unsigned long long* ret) {
+    if (x0 == 0) { *ret = 0; return 1; }
     return 0;
 }
 
@@ -490,6 +505,39 @@ void dump_match_state(uintptr_t MP) {
     }
 }
 
+// Build the loadout/weapon component (slotobj+0x4d0) for every ready participant (the
+// local player + our bots) that lacks it, via the engine's own path: EnsureComponents
+// 0xb38e70 (gated on soldier+0x5c==1) -> SetState(0x147260) builds + binds +0x4d0 +
+// finalizes; a hardening force-bind 0xaed068 closes the vtable[+0x20] gate. Without this,
+// the per-frame scoring handler 0xa82ef8 derefs a NULL +0x4d0 and crashes (also guarded
+// by H6). Idempotent (skips ids that already have +0x4d0). Game thread only.
+bool lo_done(int id) { for (int x : g_lo_done) if (x == id) return true; return false; }
+
+void ensure_playable(uintptr_t MP) {
+    if (!g_playable_ok || !authority_ok(MP)) return;
+    auto build = [&](int id) {
+        if (id < 0 || lo_done(id)) return;
+        void* so = reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa58a40)(reinterpret_cast<void*>(MP), id);
+        if (!so) return;
+        uintptr_t s = reinterpret_cast<uintptr_t>(so), wm = 0;
+        if (!rdv(s + 0x4d0, wm)) return;
+        if (wm) { g_lo_done.push_back(id); return; } // already has a loadout component
+        void** vt = *reinterpret_cast<void***>(so);   // genuine-soldier gate (same vtable[+0x20] 0x653a68 uses)
+        if ((reinterpret_cast<int (*)(void*)>(vt[0x20 / 8])(so) & 1) == 0) return;
+        *reinterpret_cast<volatile std::int32_t*>(s + 0x5c) = 1;              // arm the spawn/build gate
+        reinterpret_cast<void (*)(void*)>(g_base + 0xb38e70)(so);             // build + bind +0x4d0 + finalize
+        if (!rdv(s + 0x4d0, wm) || !wm) {
+            reinterpret_cast<void (*)(void*)>(g_base + 0xaed068)(so);         // hardening force-bind
+            rdv(s + 0x4d0, wm);
+        }
+        logi("[match] loadout build id=%d -> +0x4d0=%s", id, wm ? "ok" : "STILL NULL");
+        if (wm) g_lo_done.push_back(id);
+    };
+    std::int32_t lid = -1;
+    if (rdv(MP + 0x15d0, lid)) build(lid);
+    for (const auto& b : g_inj) build(b.id);
+}
+
 // Mission start 0x799210 (MP branch looks the local player up by id): repair first.
 extern "C" void mc5_mission_start_hook(const char*, unsigned long long, unsigned long long, unsigned long long,
                                        unsigned long long) {
@@ -609,7 +657,11 @@ extern "C" void mc5_pump_hook(const char*, unsigned long long, unsigned long lon
     if (g_local_active.load()) {
         repair_host_entry("frame");
         void* mp = reinterpret_cast<void* (*)()>(g_base + 0x4e2108)();
-        if (mp) dump_match_state(reinterpret_cast<uintptr_t>(mp));
+        if (mp) {
+            try { ensure_playable(reinterpret_cast<uintptr_t>(mp)); }
+            catch (...) { logw("[match] exception building loadouts (ignored)"); }
+            dump_match_state(reinterpret_cast<uintptr_t>(mp));
+        }
     }
     if (g_qp.active && g_qp.fire) {
         g_qp.active = false;
@@ -769,10 +821,30 @@ int install() {
         fh += install_filter_hook("H3 peerfree 0x8cc990", 0x8cc990, fpH3, reinterpret_cast<void*>(&mc5_h3_peerfree));
         fh += install_filter_hook("H5 hoststate 0xb04800", 0xb04800, fpH5, reinterpret_cast<void*>(&mc5_h5_hoststate));
         fh += install_filter_hook("H4 e5fwd 0xaf9000", 0xaf9000, fpH4, reinterpret_cast<void*>(&mc5_h4_e5));
+        static const unsigned char fpH6[16] = {0x08, 0x24, 0x56, 0xa9, 0x2a, 0x01, 0x08, 0xeb,
+                                               0x20, 0x01, 0x00, 0x54, 0x09, 0xe8, 0x83, 0xb9};
+        fh += install_filter_hook("H6 loadout-guard 0x700ea0", 0x700ea0, fpH6,
+                                  reinterpret_cast<void*>(&mc5_h6_loadout_guard));
     }
-    g_bots_ok = fns_ok && g_sink_ok && fh >= 4; // H1,H2,H3,H5 required; H4 optional
-    logi("[bots] peerless support: functions %s, %d/5 filter hooks -> %s", fns_ok ? "ok" : "MISMATCH", fh,
+    g_bots_ok = fns_ok && g_sink_ok && fh >= 4; // H1,H2,H3,H5 required; H4,H6 best-effort
+    logi("[bots] peerless support: functions %s, %d/6 filter hooks -> %s", fns_ok ? "ok" : "MISMATCH", fh,
          g_bots_ok ? "ready" : "disabled (legacy fill)");
+
+    // Loadout build (ensure_playable): fingerprint the functions it calls; a mismatch only
+    // disables the loadout build, not the bot path.
+    struct FnFp2 { uintptr_t a; unsigned char fp[16]; };
+    static const FnFp2 kLoadFns[] = {
+        {0x653a68, {0xff, 0x03, 0x01, 0xd1, 0xf6, 0x57, 0x01, 0xa9, 0xf4, 0x4f, 0x02, 0xa9, 0xfd, 0x7b, 0x03, 0xa9}},
+        {0xaed068, {0xff, 0xc3, 0x00, 0xd1, 0xf4, 0x4f, 0x01, 0xa9, 0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91}},
+        {0xb38e70, {0xf3, 0x0f, 0x1e, 0xf8, 0xfd, 0x7b, 0x01, 0xa9, 0xfd, 0x43, 0x00, 0x91, 0xf3, 0x03, 0x00, 0xaa}},
+    };
+    g_playable_ok = true;
+    for (const auto& f : kLoadFns)
+        if (!bytes_match(f.a, f.fp, sizeof(f.fp))) {
+            g_playable_ok = false;
+            logw("[match] loadout function 0x%llx fingerprint mismatch", static_cast<unsigned long long>(f.a));
+        }
+    logi("[match] loadout build %s", g_playable_ok ? "ready" : "disabled");
     return n;
 }
 

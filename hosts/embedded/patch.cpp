@@ -917,6 +917,34 @@ int install_login_trace_hooks() {
     return n;
 }
 
+// Host self-registration 0xae3a70 adds the LOCAL player (the match host) to the player
+// table with state 4 (spectator/host): at 0xae3aa4 `mov w8,#4` -> stored as the AddPlayer
+// state arg. State != 1 makes AddPlayer force the stored id to 0xffff and the player a
+// view-less spectator (black screen, no soldier/camera). Patch the single instruction to
+// `mov w8,#1` so the host joins as a real, id-addressable, spawning participant (both are
+// ORR-immediate encodings; only one byte differs). Authority is independent (conn+0x6c),
+// so the host role is unaffected. See docs/research/06 and the realplay RE. arm64 only.
+constexpr uintptr_t kHostStateVaddr = 0xae3aa4;
+const unsigned char kHostStateFp[4] = {0xe8, 0x03, 0x1e, 0x32};    // mov w8, #4
+const unsigned char kHostStatePatch[4] = {0xe8, 0x03, 0x00, 0x32}; // mov w8, #1
+
+int apply_libmc5_host_player_state() {
+    uintptr_t base = so_base("libMC5.so");
+    if (base == 0) { logw("host-player-state: libMC5.so not loaded"); return 0; }
+    void* site = reinterpret_cast<void*>(base + kHostStateVaddr);
+    if (std::memcmp(site, kHostStateFp, sizeof(kHostStateFp)) != 0) {
+        logw("host-player-state: fingerprint mismatch at %p (got %s) — refusing", site,
+             hexpre(reinterpret_cast<unsigned char*>(site), 4).c_str());
+        return 0;
+    }
+    if (!set_prot(site, 4, PROT_READ | PROT_WRITE)) { loge("host-player-state: mprotect RW failed"); return 0; }
+    std::memcpy(site, kHostStatePatch, sizeof(kHostStatePatch));
+    set_prot(site, 4, PROT_READ | PROT_EXEC);
+    __builtin___clear_cache(reinterpret_cast<char*>(site), reinterpret_cast<char*>(site) + 4);
+    logi("host-player-state: local host joins as a real player at %p (mov w8,#4 -> #1)", site);
+    return 1;
+}
+
 int apply_libmc5_connected_gate() {
     uintptr_t base = so_base("libMC5.so");
     if (base == 0) { logw("connected-gate: libMC5.so not loaded"); return 0; }
@@ -1004,6 +1032,11 @@ int apply_libmc5_tls_bypass() {
 
 int apply_libmc5_connected_gate() {
     logw("connected-gate: no offset for this ABI (arm64 only)");
+    return 0;
+}
+
+int apply_libmc5_host_player_state() {
+    logw("host-player-state: arm64 only");
     return 0;
 }
 

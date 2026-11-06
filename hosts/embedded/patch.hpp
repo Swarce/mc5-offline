@@ -38,6 +38,12 @@ int apply_libmc5_tls_bypass();
 // See docs/research/02 §10.
 int apply_libmc5_connected_gate();
 
+// Host self-register 0xae3a70 adds the local match host with player state 4 (spectator):
+// patches the single `mov w8,#4` at 0xae3aa4 to `mov w8,#1` so the host joins as a real
+// spawning participant (fixes the black spectator view in a locally hosted match).
+// 4-byte fingerprint-guarded; returns 1 if applied. arm64 only. See docs/research/06.
+int apply_libmc5_host_player_state();
+
 // Diagnostic: replaces the Gaia "[IRISCfgProvider]" logger (a no-op in the shipped
 // release build, since its sink is null) with a trampoline that tees each discovery
 // message to logcat, so the game reports its own boot/discovery trace ("Getting
