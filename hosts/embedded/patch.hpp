@@ -94,6 +94,10 @@ int install_item_dump_hooks(ItemSink sink);
 // called on the hooked function's thread as logger(label, x0, x1, x2, lr), then the
 // original runs. Returns 1 if installed.
 int install_entry_hook(const char* label, uintptr_t vaddr, const unsigned char (&fp)[16], void* logger);
+// Filter hook at libMC5 vaddr (16-byte fingerprint, relocatable prologue; see
+// filter_tramp.hpp): filter(x0, x1, x2, x3, &ret) returning non-zero makes the hooked
+// function return `ret` at once; zero runs the original untouched. Returns 1 if installed.
+int install_filter_hook(const char* label, uintptr_t vaddr, const unsigned char (&fp)[16], void* filter);
 uintptr_t libmc5_base();
 
 } // namespace mc5

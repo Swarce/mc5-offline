@@ -14,6 +14,7 @@
 
 #include "../../server/core/log.hpp"
 #include "gothook.hpp"
+#include "filter_tramp.hpp"
 #include "item_dump.hpp"
 #include <atomic>
 
@@ -842,6 +843,42 @@ int install_entry_hook(const char* label, uintptr_t vaddr, const unsigned char (
 
 uintptr_t libmc5_base() { return so_base("libMC5.so"); }
 
+int install_filter_hook(const char* label, uintptr_t vaddr, const unsigned char (&fp)[16], void* filter) {
+    uintptr_t base = so_base("libMC5.so");
+    if (base == 0) { logw("filter-hook %s: libMC5.so not loaded", label); return 0; }
+    g_mc5_base = base;
+    void* site = reinterpret_cast<void*>(base + vaddr);
+    if (std::memcmp(site, fp, 16) != 0) {
+        logw("filter-hook %s: fingerprint mismatch at %p (got %s) — refusing", label, site,
+             hexpre(reinterpret_cast<unsigned char*>(site), 16).c_str());
+        return 0;
+    }
+    std::uint32_t orig[4];
+    std::memcpy(orig, site, sizeof(orig));
+    long ps = sysconf(_SC_PAGESIZE);
+    void* page = mmap(nullptr, ps, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) { loge("filter-hook %s: mmap failed", label); return 0; }
+    if (!build_filter_tramp(static_cast<std::uint32_t*>(page), orig, base + vaddr + 16,
+                            reinterpret_cast<std::uint64_t>(filter))) {
+        logw("filter-hook %s: prologue at %p not relocatable — refusing", label, site);
+        munmap(page, ps);
+        return 0;
+    }
+    __builtin___clear_cache(reinterpret_cast<char*>(page), reinterpret_cast<char*>(page) + ps);
+    unsigned char entry[16] = {0x50, 0x00, 0x00, 0x58, 0x00, 0x02, 0x1f, 0xd6}; // ldr x16,#8 ; br x16
+    std::memcpy(entry + 8, &page, sizeof(page));
+    if (!set_prot(site, sizeof(entry), PROT_READ | PROT_WRITE)) {
+        loge("filter-hook %s: mprotect RW failed", label);
+        munmap(page, ps);
+        return 0;
+    }
+    std::memcpy(site, entry, sizeof(entry));
+    set_prot(site, sizeof(entry), PROT_READ | PROT_EXEC);
+    __builtin___clear_cache(reinterpret_cast<char*>(site), reinterpret_cast<char*>(site) + sizeof(entry));
+    logi("filter-hook %s: installed at %p -> tramp %p", label, site, page);
+    return 1;
+}
+
 int install_item_dump_hooks(ItemSink sink) {
     uintptr_t base = so_base("libMC5.so");
     if (base == 0) { logw("item-dump: libMC5.so not loaded"); return 0; }
@@ -1007,6 +1044,11 @@ int install_item_dump_hooks(ItemSink) {
 
 int install_entry_hook(const char* label, uintptr_t, const unsigned char (&)[16], void*) {
     logw("entry-hook %s: arm64 only", label);
+    return 0;
+}
+
+int install_filter_hook(const char* label, uintptr_t, const unsigned char (&)[16], void*) {
+    logw("filter-hook %s: arm64 only", label);
     return 0;
 }
 
