@@ -945,6 +945,33 @@ int apply_libmc5_host_player_state() {
     return 1;
 }
 
+// Null-safe replacement for the current-weapon accessor 0x700ea0:
+//   orig: loadout=x0; return loadout->vec[*(int*)(loadout+0x3e8)] (null-safe only on the
+//   vector, NOT on loadout itself) -> SIGSEGV at 0x160 when a participant's loadout
+//   (slotobj+0x4d0) is NULL. We fully replace it (leaf jump, no relocation) with a version
+//   that returns NULL for a NULL loadout; every caller already handles a NULL weapon.
+extern "C" void* mc5_safe_current_weapon(void* loadout) {
+    if (!loadout) return nullptr;
+    char* p = reinterpret_cast<char*>(loadout);
+    std::uintptr_t begin = *reinterpret_cast<std::uintptr_t*>(p + 0x160);
+    std::uintptr_t end = *reinterpret_cast<std::uintptr_t*>(p + 0x168);
+    if (end == begin) return nullptr;
+    int idx = *reinterpret_cast<int*>(p + 0x3e8);
+    if (idx < 0) return nullptr;
+    long count = static_cast<long>(end - begin) >> 5; // 0x20-byte elements
+    if (static_cast<long>(idx) >= count) return nullptr;
+    return *reinterpret_cast<void**>(begin + (static_cast<std::uintptr_t>(idx) << 5));
+}
+
+int apply_libmc5_weapon_accessor_guard() {
+    uintptr_t base = so_base("libMC5.so");
+    if (base == 0) { logw("weapon-accessor-guard: libMC5.so not loaded"); return 0; }
+    static const unsigned char fp[16] = {0x08, 0x24, 0x56, 0xa9, 0x2a, 0x01, 0x08, 0xeb,
+                                         0x20, 0x01, 0x00, 0x54, 0x09, 0xe8, 0x83, 0xb9};
+    return install_leaf_jump("weapon-accessor-guard(0x700ea0)", base + 0x700ea0, fp,
+                             reinterpret_cast<void*>(&mc5_safe_current_weapon));
+}
+
 int apply_libmc5_connected_gate() {
     uintptr_t base = so_base("libMC5.so");
     if (base == 0) { logw("connected-gate: libMC5.so not loaded"); return 0; }
@@ -1037,6 +1064,11 @@ int apply_libmc5_connected_gate() {
 
 int apply_libmc5_host_player_state() {
     logw("host-player-state: arm64 only");
+    return 0;
+}
+
+int apply_libmc5_weapon_accessor_guard() {
+    logw("weapon-accessor-guard: arm64 only");
     return 0;
 }
 

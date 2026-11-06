@@ -371,18 +371,6 @@ extern "C" int mc5_h4_e5(unsigned long long mp, unsigned long long msg, unsigned
     return 0;
 }
 
-// H6 0x700ea0: returns a participant's current-weapon = loadout->vec[loadout->idx], but
-// derefs the loadout (x0) with no NULL check (ldp [x0+0x160]). The per-frame scoring/HUD
-// handler 0xa82ef8 calls it with *(soldier+0x4d0), which is NULL for any participant whose
-// loadout component was not built -> SIGSEGV at addr 0x160. Guard: for x0==NULL return
-// NULL; every caller already handles a NULL current-weapon (cbz x0). Safety net in case a
-// participant still reaches the scoring loop without a loadout.
-extern "C" int mc5_h6_loadout_guard(unsigned long long x0, unsigned long long, unsigned long long,
-                                    unsigned long long, unsigned long long* ret) {
-    if (x0 == 0) { *ret = 0; return 1; }
-    return 0;
-}
-
 bool authority_ok(uintptr_t MP) {
     return (reinterpret_cast<int (*)(void*)>(g_base + 0xac02c0)(reinterpret_cast<void*>(MP)) & 1) != 0;
 }
@@ -826,13 +814,9 @@ int install() {
         fh += install_filter_hook("H3 peerfree 0x8cc990", 0x8cc990, fpH3, reinterpret_cast<void*>(&mc5_h3_peerfree));
         fh += install_filter_hook("H5 hoststate 0xb04800", 0xb04800, fpH5, reinterpret_cast<void*>(&mc5_h5_hoststate));
         fh += install_filter_hook("H4 e5fwd 0xaf9000", 0xaf9000, fpH4, reinterpret_cast<void*>(&mc5_h4_e5));
-        static const unsigned char fpH6[16] = {0x08, 0x24, 0x56, 0xa9, 0x2a, 0x01, 0x08, 0xeb,
-                                               0x20, 0x01, 0x00, 0x54, 0x09, 0xe8, 0x83, 0xb9};
-        fh += install_filter_hook("H6 loadout-guard 0x700ea0", 0x700ea0, fpH6,
-                                  reinterpret_cast<void*>(&mc5_h6_loadout_guard));
     }
-    g_bots_ok = fns_ok && g_sink_ok && fh >= 4; // H1,H2,H3,H5 required; H4,H6 best-effort
-    logi("[bots] peerless support: functions %s, %d/6 filter hooks -> %s", fns_ok ? "ok" : "MISMATCH", fh,
+    g_bots_ok = fns_ok && g_sink_ok && fh >= 4; // H1,H2,H3,H5 required; H4 optional
+    logi("[bots] peerless support: functions %s, %d/5 filter hooks -> %s", fns_ok ? "ok" : "MISMATCH", fh,
          g_bots_ok ? "ready" : "disabled (legacy fill)");
 
     // Real local play (ensure_playable): fingerprint the engine-spawn functions it calls; a

@@ -133,6 +133,10 @@ void start_redirect_installer(int http_port, int tls_port, ItemSink item_sink) {
                 // spectator) so a hosted Quick Play match is playable, not a black view.
                 apply_libmc5_host_player_state();
                 diag::boot_trace("host-player state patch applied");
+                // Null-safe the current-weapon accessor so a participant without a loadout
+                // component can never SIGSEGV the per-frame scoring handler.
+                apply_libmc5_weapon_accessor_guard();
+                diag::boot_trace("weapon-accessor guard applied");
                 // Game-thread services: cheat bytes, zone table walk, local bot match.
                 gameplay::install();
                 diag::boot_trace("gameplay hooks installed");

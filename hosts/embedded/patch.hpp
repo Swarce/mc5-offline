@@ -44,6 +44,11 @@ int apply_libmc5_connected_gate();
 // 4-byte fingerprint-guarded; returns 1 if applied. arm64 only. See docs/research/06.
 int apply_libmc5_host_player_state();
 
+// Null-safe replacement of the current-weapon accessor 0x700ea0 (leaf jump, no relocation)
+// so a participant with no loadout component (slotobj+0x4d0 == NULL) returns NULL instead of
+// SIGSEGV in the per-frame scoring handler. Returns 1 if applied. arm64 only.
+int apply_libmc5_weapon_accessor_guard();
+
 // Diagnostic: replaces the Gaia "[IRISCfgProvider]" logger (a no-op in the shipped
 // release build, since its sink is null) with a trampoline that tees each discovery
 // message to logcat, so the game reports its own boot/discovery trace ("Getting
