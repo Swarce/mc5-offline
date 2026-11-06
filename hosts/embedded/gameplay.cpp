@@ -296,7 +296,11 @@ void repair_host_entry(const char* where) {
 // See docs/research/06-zones-cheats-bots.md (B) and filter_tramp.hpp. Nothing here has
 // run on a device yet: every address is fingerprinted at install() and every step bails
 // safely on a surprise. All of it runs on the game thread (the bot tick).
-std::atomic<bool> g_peerless{true}; // settings bots.peerless; false = legacy game fill
+std::atomic<bool> g_peerless{true};  // settings bots.peerless; false = legacy game fill
+std::atomic<bool> g_realplay{false}; // settings bots.realplay; make the local host a playing
+                                     // soldier (EXPERIMENTAL: the host has no loadout data in a
+                                     // local match, so the engine spawn yields no weapon and can
+                                     // crash). Default off: bots play, the host spectates.
 bool g_bots_ok = false;             // every called function fingerprinted at install()
 bool g_sink_ok = false;             // the outgoing-stream ctor 0x8cff28 fingerprinted
 uintptr_t g_inj_bm = 0;             // bot manager of the match we are filling (game thread)
@@ -508,11 +512,14 @@ void dump_match_state(uintptr_t MP) {
 //   player and each bot, then 0xaf3170(MP) admits them to the CanStart map so the round
 //   starts. Runs once per match. Game thread only.
 void ensure_playable(uintptr_t MP) {
-    if (g_spawn_done || !g_realplay_ok || !authority_ok(MP)) return;
+    if (!g_realplay.load() || g_spawn_done || !g_realplay_ok || !authority_ok(MP)) return;
     std::int32_t lid = -1;
     if (!rdv(MP + 0x15d0, lid) || lid < 0) return;
     // Wait until bots exist (the match is live) before spawning the local player.
     if (g_inj.empty()) return;
+    // The host registers itself as state 4 (spectator); make it a real participant first.
+    static bool patched = false;
+    if (!patched) { apply_libmc5_host_player_state(); patched = true; }
     void* ctx = reinterpret_cast<void* (*)()>(g_base + 0x511a68)();
     if (!ctx) return;
     // The builder 0x5be1c8 picks the in-match soldier state 0x14726d (loadout + camera) only
@@ -750,7 +757,10 @@ void configure_quick_play(bool enabled, int search_min_s, int search_max_s) {
     g_qp_search_max.store(search_max_s < 0 ? 0 : (search_max_s > 60 ? 60 : search_max_s));
 }
 
-void configure_bots(bool peerless) { g_peerless.store(peerless); }
+void configure_bots(bool peerless, bool realplay) {
+    g_peerless.store(peerless);
+    g_realplay.store(realplay);
+}
 
 int install() {
     g_base = libmc5_base();

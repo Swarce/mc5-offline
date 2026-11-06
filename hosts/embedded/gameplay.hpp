@@ -14,7 +14,9 @@ void set_context(ServerContext* ctx);
 void configure_quick_play(bool enabled, int search_min_s, int search_max_s);
 // settings bots.peerless: true = fill the hosted match with connection-less bots
 // (a full lobby); false = the legacy path (the game's own fill, at most one bot).
-void configure_bots(bool peerless);
+// realplay (experimental, default off): make the local host a playing soldier; off = the
+// host spectates while bots play (the host has no loadout data in a local match).
+void configure_bots(bool peerless, bool realplay);
 // Installs the per-frame pump hook and the bot tick hook (after libMC5 is loaded).
 int install();
 // Queued for the next game frame:
