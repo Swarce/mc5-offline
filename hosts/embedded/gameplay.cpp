@@ -50,6 +50,8 @@ std::atomic<int> g_qp_search_min{3}, g_qp_search_max{8};
 std::atomic<uintptr_t> g_last_bm{0};
 void* g_pushed_st = nullptr;  // our MultiplayerStartLocalGame state (game thread only)
 int g_pushed_frames = 0;
+long g_dump_next_ms = 0;       // match-state diagnostic throttle (game thread only)
+int g_dump_left = 0;
 // Bots for the running local match: re-asserted on every bot tick (game thread).
 std::atomic<int> g_bot_target{0};
 std::atomic<bool> g_local_active{false}; // a local match we started is (being) hosted
@@ -204,6 +206,8 @@ void start_bot_match_now(int bots) {
     g_last_bm.store(0);
     g_pushed_st = st;
     g_pushed_frames = 0;
+    g_dump_left = 15; // dump match state once/second for the first 15 s (diagnostic)
+    g_dump_next_ms = 0;
     logi("[botmatch] local match state pushed (MP=0x%llx, top=%p); %d bots will be requested when the match's "
          "bot manager appears", static_cast<unsigned long long>(m), top, bots);
 }
@@ -444,6 +448,43 @@ void drive_peerless_bots(uintptr_t bm, uintptr_t MP) {
     if (c58 != have) *reinterpret_cast<volatile std::int32_t*>(bm + 0x58) = have;
 }
 
+// Diagnostic: while our hosted match is live, dump the local player and each bot's
+// state once per second for the first ~15 s, plus the match phase byte. This tells a
+// device run whether the black screen is the local player (host) not spawning like a
+// real participant, versus a phase/render issue. Logging only; all reads are guarded.
+void dump_match_state(uintptr_t MP) {
+    long now = static_cast<long>(reinterpret_cast<int (*)()>(g_base + 0x4e1c98)());
+    if (g_dump_left <= 0 || now < g_dump_next_ms) return;
+    g_dump_next_ms = now + 1000;
+    --g_dump_left;
+    std::int32_t lid = -1;
+    unsigned char phase = 0;
+    rdv(MP + 0x15d0, lid);
+    rdv(MP + 0xc4, phase);
+    // the local player's table entry (by id) and its slot object
+    void* ep = lid >= 0 ? reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa62f58)(reinterpret_cast<void*>(MP), lid)
+                        : nullptr;
+    int st = -1, team = -1; signed char slot = 0;
+    if (ep) {
+        uintptr_t e = reinterpret_cast<uintptr_t>(ep);
+        unsigned char b_st = 0, b_tm = 0; rdv(e + 0x1b, b_st); rdv(e + 0x1a, b_tm); rdv(e + 0x16, slot);
+        st = b_st; team = b_tm;
+    }
+    void* so = lid >= 0 ? reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa58a40)(reinterpret_cast<void*>(MP), lid)
+                        : nullptr;
+    int ready = -1;
+    if (so) { ready = reinterpret_cast<int (*)(void*, int)>(g_base + 0xa654f0)(reinterpret_cast<void*>(MP), lid) & 1; }
+    logi("[match] phase=%u localId=%d entry{state=%d team=%d slot=%d} soldier=%s ready=%d bots=%d",
+         phase, lid, st, team, slot, so ? "yes" : "no", ready, static_cast<int>(g_inj.size()));
+    for (const auto& b : g_inj) {
+        void* bso = reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa58a40)(reinterpret_cast<void*>(MP), b.id);
+        int br = reinterpret_cast<int (*)(void*, int)>(g_base + 0xa654f0)(reinterpret_cast<void*>(MP), b.id) & 1;
+        int bt = -1;
+        if (bso) { int t = reinterpret_cast<int (*)(void*)>(g_base + 0x5bb930)(bso); bt = t; }
+        logi("[match]   bot id=%d slot=%d soldier=%s ready=%d team=%d", b.id, b.slot, bso ? "yes" : "no", br, bt);
+    }
+}
+
 // Mission start 0x799210 (MP branch looks the local player up by id): repair first.
 extern "C" void mc5_mission_start_hook(const char*, unsigned long long, unsigned long long, unsigned long long,
                                        unsigned long long) {
@@ -560,7 +601,11 @@ extern "C" void mc5_pump_hook(const char*, unsigned long long, unsigned long lon
             g_bot_target.store(0);
         }
     }
-    if (g_local_active.load()) repair_host_entry("frame");
+    if (g_local_active.load()) {
+        repair_host_entry("frame");
+        void* mp = reinterpret_cast<void* (*)()>(g_base + 0x4e2108)();
+        if (mp) dump_match_state(reinterpret_cast<uintptr_t>(mp));
+    }
     if (g_qp.active && g_qp.fire) {
         g_qp.active = false;
         g_qp.fire = false;
