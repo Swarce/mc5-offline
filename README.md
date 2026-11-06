@@ -15,6 +15,8 @@ See [docs/STATUS.md](docs/STATUS.md).
   Delivery packs that cannot be copied off a phone without root).
 - [docs/research/00-recon.md](docs/research/00-recon.md): engine, online stack, multiplayer architecture, content
   delivery, the proposed architecture and milestones.
+- [docs/research/07-steam-build.md](docs/research/07-steam-build.md): what the Steam build's `mc5.exe`/`.iobj`/`.ipdb`
+  contain (a linker cache, no game symbols) and how far they help.
 - [docs/STATUS.md](docs/STATUS.md), [docs/ROADMAP.md](docs/ROADMAP.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Legal note
