@@ -78,6 +78,7 @@ void start_locked(const std::string& data_dir) {
             mc5::gameplay::configure_quick_play(b["quickPlay"].as_bool(true),
                                                 static_cast<int>(b["searchSecondsMin"].as_int(3)),
                                                 static_cast<int>(b["searchSecondsMax"].as_int(8)));
+            mc5::gameplay::configure_bots(b["peerless"].as_bool(true));
         }
         g_ctx->host.apply_cheats = [](bool g, bool a, bool m) { mc5::gameplay::queue_cheats(g, a, m); };
         g_ctx->host.request_zone_walk = [] { mc5::gameplay::queue_zone_walk(); };

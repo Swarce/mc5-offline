@@ -12,6 +12,7 @@
 #include "gameplay.hpp"
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <chrono>
 #include <cstring>
@@ -276,6 +277,173 @@ void repair_host_entry(const char* where) {
     logi("[botmatch] host player entry %d: id -1 -> %d (%s)", candidate, lid, where);
 }
 
+// --- peerless AI bots (fill a hosted match with bots that hold no connection) -------
+// The hosted match's connection object has one peer slot, taken by the host, so the
+// game's own AddBot (which needs a peer) can seat at most one bot. Instead we add each
+// bot straight to the multiplayer manager's player table with a unique negative
+// "connection slot" sentinel, mark the slot object a bot, and run the game's own
+// BotReady 0xae5bf0 so it gets a team, a loadout and the ready state -- all dispatched
+// locally, never over the wire. Five small filter hooks keep a negative slot from
+// reaching code that would index a per-slot array or write an outgoing stream with it.
+// See docs/research/06-zones-cheats-bots.md (B) and filter_tramp.hpp. Nothing here has
+// run on a device yet: every address is fingerprinted at install() and every step bails
+// safely on a surprise. All of it runs on the game thread (the bot tick).
+std::atomic<bool> g_peerless{true}; // settings bots.peerless; false = legacy game fill
+bool g_bots_ok = false;             // every called function fingerprinted at install()
+bool g_sink_ok = false;             // the outgoing-stream ctor 0x8cff28 fingerprinted
+uintptr_t g_inj_bm = 0;             // bot manager of the match we are filling (game thread)
+
+// Two "bit bucket" outgoing streams returned for bot slots by H1/H2. The writers bound
+// each write to the buffer and set an overflow flag; the buffer is reset each tick and
+// is never flushed to a socket.
+alignas(16) unsigned char g_sinkA[0x40];
+alignas(16) unsigned char g_sinkB[0x40];
+std::vector<unsigned char> g_sinkbufA, g_sinkbufB;
+
+void init_sinks() {
+    if (!g_sink_ok) return;
+    if (g_sinkbufA.empty()) { g_sinkbufA.assign(0x10000, 0); g_sinkbufB.assign(0x10000, 0); }
+    using Ctor = void (*)(void*, void*, int, int); // (stream, buf, size, mode)
+    Ctor ctor = reinterpret_cast<Ctor>(g_base + 0x8cff28);
+    ctor(g_sinkA, g_sinkbufA.data(), 0x10000, 0);
+    ctor(g_sinkB, g_sinkbufB.data(), 0x10000, 0);
+}
+
+// Low 32 bits of a register argument, read as a signed slot (bot slots arrive
+// sign-extended into w1, e.g. -2; a real slot is 0..0x7f).
+inline int slot_arg(unsigned long long x) { return static_cast<int>(static_cast<std::uint32_t>(x)); }
+
+// H1 0xb20518 / H2 0xb2a560: the authority's per-slot outgoing-stream getters. For a bot
+// (negative slot) hand back a sink instead of letting them index out of range / return
+// NULL (no caller null-checks the result).
+extern "C" int mc5_h1_stream(unsigned long long, unsigned long long slot, unsigned long long,
+                             unsigned long long, unsigned long long* ret) {
+    if (slot_arg(slot) < 0) { *ret = reinterpret_cast<unsigned long long>(g_sinkA); return 1; }
+    return 0;
+}
+extern "C" int mc5_h2_stream(unsigned long long, unsigned long long slot, unsigned long long,
+                             unsigned long long, unsigned long long* ret) {
+    if (slot_arg(slot) < 0) { *ret = reinterpret_cast<unsigned long long>(g_sinkB); return 1; }
+    return 0;
+}
+// H3 0x8cc990: frees connection peer[slot]. Only slot 0 is a real peer; for any other
+// slot (a bot's sentinel, or a stray) do nothing -- the real function indexes the peer
+// array with no bound and would corrupt memory for slot != 0.
+extern "C" int mc5_h3_peerfree(unsigned long long, unsigned long long slot, unsigned long long,
+                               unsigned long long, unsigned long long* ret) {
+    if (slot_arg(slot) != 0) { *ret = 0; return 1; }
+    return 0;
+}
+// H5 0xb04800: writes MP[0xcc+slot]=1. Valid slots are 0..0x7f; a bot's negative slot
+// would scribble over MP+0xbf..0xca (the host-state and clock-sync bytes). Run the
+// original only for a real slot.
+extern "C" int mc5_h5_hoststate(unsigned long long, unsigned long long slot, unsigned long long,
+                                unsigned long long, unsigned long long* ret) {
+    if (static_cast<std::uint32_t>(slot) < 0x80) return 0;
+    *ret = 0;
+    return 1;
+}
+// H4 0xaf9000: the msg-0xe5 forwarder, addressed by player id. If that id belongs to a
+// bot (its table entry has a negative slot) drop the message rather than forward it
+// through the by-slot stream.
+extern "C" int mc5_h4_e5(unsigned long long mp, unsigned long long msg, unsigned long long,
+                         unsigned long long, unsigned long long* ret) {
+    std::int16_t id = 0;
+    if (!rdv(msg + 0xa, id)) return 0;
+    for (int k = 0; k < 128; ++k) {
+        uintptr_t e = static_cast<uintptr_t>(mp) + 0x1d0 + 0x28ull * k;
+        std::int16_t eid = 0;
+        if (!rdv(e + 0x18, eid)) return 0;
+        if (eid == id) {
+            signed char slot = 0;
+            if (rdv(e + 0x16, slot) && slot < 0) { *ret = 0; return 1; }
+            return 0;
+        }
+    }
+    return 0;
+}
+
+bool authority_ok(uintptr_t MP) {
+    return (reinterpret_cast<int (*)(void*)>(g_base + 0xac02c0)(reinterpret_cast<void*>(MP)) & 1) != 0;
+}
+
+struct InjBot { int id; signed char slot; };
+std::vector<InjBot> g_inj; // bots we injected into the live match (game thread only)
+
+// Add one bot to the player table with the k-th negative sentinel slot. Every game call
+// is by fingerprinted address; any surprise value bails without touching more state.
+bool inject_one_bot(uintptr_t MP, int k) {
+    void* gi = reinterpret_cast<void* (*)()>(g_base + 0x4e2108)();
+    if (reinterpret_cast<uintptr_t>(gi) != MP) return false;
+    int id = reinterpret_cast<int (*)(void*)>(g_base + 0xae3dd8)(reinterpret_cast<void*>(MP)); // free id
+    if (id < 1 || id > 0x7f) return false;
+    int cap = 0;
+    rdv(MP + 0x1880, cap);
+    unsigned char lowpop = 0;
+    if (rdv(MP + 0x1894, lowpop) && (lowpop & 1)) cap -= 4;
+    if (cap < 2) cap = 2;
+    if (cap > 12) cap = 12;
+    if (id >= cap) return false;
+    if (reinterpret_cast<int (*)(void*, int)>(g_base + 0xa62f10)(reinterpret_cast<void*>(MP), id)) return false; // in use
+
+    static const char* kCallsigns[12] = {"Ghost", "Viper",  "Reaper", "Havoc", "Blaze",   "Talon",
+                                         "Wraith", "Nomad", "Saint",  "Fury",  "Specter", "Raptor"};
+    char uid[20] = {0};
+    std::snprintf(uid, sizeof(uid), "%s", kCallsigns[k % 12]);
+    char cred[32];
+    int* ctr = reinterpret_cast<int*>(g_base + 0x1bc2d88);
+    std::snprintf(cred, sizeof(cred), "bot_credentials_%d", (*ctr)++);
+
+    // AddPlayer(MP, uid20, slot=0x7f (a temp >=0 slot, so it is accepted), id, botType=0,
+    // cred, NULL, cred2, 0, state=1). state 1 is what makes the entry keep the id.
+    using AddPlayer = void (*)(void*, const void*, int, int, int, const char*, void*, const char*, int, int);
+    reinterpret_cast<AddPlayer>(g_base + 0xae3ad0)(reinterpret_cast<void*>(MP), uid, 0x7f, id, 0, cred, nullptr,
+                                                   cred, 0, 1);
+    void* ep = reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa62f58)(reinterpret_cast<void*>(MP), id);
+    if (!ep) return false;
+    uintptr_t e = reinterpret_cast<uintptr_t>(ep);
+    unsigned char used = 0, st = 0;
+    std::int16_t eid = 0;
+    if (!rdv(e, used) || !rdv(e + 0x18, eid) || !rdv(e + 0x1b, st) || used != 1 || eid != id || st != 1)
+        return false;
+    signed char sent = static_cast<signed char>(-(2 + k)); // -2, -3, ...: never 0 (host) or -1 (free)
+    *reinterpret_cast<volatile signed char*>(e + 0x16) = sent;
+
+    void* so = reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa58a40)(reinterpret_cast<void*>(MP), id);
+    if (!so) return false;
+    reinterpret_cast<void (*)(void*, int)>(g_base + 0x65b8d0)(so, 1); // slot object +0x58 = isBot
+    void** svt = *reinterpret_cast<void***>(so);
+    reinterpret_cast<void (*)(void*, int)>(svt[0x40 / 8])(so, 0);     // bot kind 0 (base AI)
+    reinterpret_cast<void (*)(void*, int)>(g_base + 0xae5bf0)(reinterpret_cast<void*>(MP), id); // BotReady
+    reinterpret_cast<void (*)(void*)>(g_base + 0xaf3170)(reinterpret_cast<void*>(MP));          // enter CanStart map
+
+    bool inuse = reinterpret_cast<int (*)(void*, int)>(g_base + 0xa661a0)(reinterpret_cast<void*>(MP), id) & 1;
+    bool ready = reinterpret_cast<int (*)(void*, int)>(g_base + 0xa654f0)(reinterpret_cast<void*>(MP), id) & 1;
+    g_inj.push_back({id, sent});
+    logi("[bots] injected '%s' id %d slot %d inuse=%d ready=%d (%d/%d)", uid, id, sent, inuse, ready,
+         static_cast<int>(g_inj.size()), g_bot_target.load());
+    return true;
+}
+
+// Called from the bot tick while our hosted match is live: add one bot per tick up to
+// the target, and keep the bot manager's counter equal to how many we have, so its own
+// UpdateBotPlayers neither adds (its AddBot cannot seat a second peer) nor churns.
+void drive_peerless_bots(uintptr_t bm, uintptr_t MP) {
+    int target = g_bot_target.load();
+    if (target <= 0 || !g_bots_ok) return;
+    if (!authority_ok(MP)) return;
+    if (g_inj_bm != bm) { g_inj_bm = bm; g_inj.clear(); } // new match
+    repair_host_entry("bot tick");
+    if (static_cast<int>(g_inj.size()) < target) {
+        init_sinks();
+        inject_one_bot(MP, static_cast<int>(g_inj.size()));
+    }
+    std::int32_t c58 = 0;
+    rdv(bm + 0x58, c58);
+    int have = static_cast<int>(g_inj.size());
+    if (c58 != have) *reinterpret_cast<volatile std::int32_t*>(bm + 0x58) = have;
+}
+
 // Mission start 0x799210 (MP branch looks the local player up by id): repair first.
 extern "C" void mc5_mission_start_hook(const char*, unsigned long long, unsigned long long, unsigned long long,
                                        unsigned long long) {
@@ -439,8 +607,19 @@ extern "C" void mc5_bot_tick_hook(const char*, unsigned long long x0, unsigned l
                                   unsigned long long) {
     int n = g_bot_target.load();
     if (n <= 0) return;
-    uintptr_t bm = static_cast<uintptr_t>(x0), data = 0;
+    uintptr_t bm = static_cast<uintptr_t>(x0);
     if (bm < 0x1000) return;
+    // Preferred path: inject bots that hold no connection, so a full lobby is possible.
+    if (g_peerless.load() && g_bots_ok) {
+        void* mp = reinterpret_cast<void* (*)()>(g_base + 0x4e2108)();
+        uintptr_t MP = reinterpret_cast<uintptr_t>(mp), cur = 0;
+        if (MP >= 0x1000 && rdv(MP + 0xb340, cur) && cur == bm) {
+            try { drive_peerless_bots(bm, MP); } catch (...) { logw("[bots] exception in the bot tick (ignored)"); }
+        }
+        return;
+    }
+    // Legacy fill (the game's own AddBot; seats at most one bot on a hosted match).
+    uintptr_t data = 0;
     if (!rdv(bm + 0x20, data) || data < 0x1000) return; // bots data not loaded yet
     // The local player must hold its id first, or the free-id search 0xae3dd8 (which skips
     // negative ids) would hand id 0 -- the local player's -- to the first bot.
@@ -467,6 +646,8 @@ void configure_quick_play(bool enabled, int search_min_s, int search_max_s) {
     g_qp_search_max.store(search_max_s < 0 ? 0 : (search_max_s > 60 ? 60 : search_max_s));
 }
 
+void configure_bots(bool peerless) { g_peerless.store(peerless); }
+
 int install() {
     g_base = libmc5_base();
     if (!g_base) { logw("[gameplay] libMC5 not loaded"); return 0; }
@@ -491,6 +672,54 @@ int install() {
     n += install_entry_hook("MissionStart(0x799210)", 0x799210, kMissionFp, reinterpret_cast<void*>(&mc5_mission_start_hook));
     logi("[gameplay] %d/5 hooks; local-match sequence %s, settings getter %s, campaign getter %s", n,
          g_seq_ok ? "ok" : "MISMATCH", g_settings_ok ? "ok" : "MISMATCH", g_camp_ok ? "ok" : "MISMATCH");
+
+    // Peerless bots: verify every game function the injector calls, then install the
+    // filter hooks that make a bot's negative slot harmless. If anything is off for this
+    // build, g_bots_ok stays false and the bot tick falls back to the legacy fill.
+    struct FnFp { uintptr_t a; unsigned char fp[16]; };
+    static const FnFp kBotFns[] = {
+        {0x8cff28, {0xf6, 0x57, 0xbd, 0xa9, 0xf4, 0x4f, 0x01, 0xa9, 0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91}},
+        {0xae3dd8, {0xff, 0x03, 0x01, 0xd1, 0xf4, 0x4f, 0x02, 0xa9, 0xfd, 0x7b, 0x03, 0xa9, 0xfd, 0xc3, 0x00, 0x91}},
+        {0xae3ad0, {0xf7, 0x0f, 0x1c, 0xf8, 0xf6, 0x57, 0x01, 0xa9, 0xf4, 0x4f, 0x02, 0xa9, 0xfd, 0x7b, 0x03, 0xa9}},
+        {0xa62f58, {0xe8, 0x03, 0x1f, 0xaa, 0x00, 0x40, 0x07, 0x91, 0x09, 0x30, 0xc0, 0x79, 0x3f, 0x01, 0x01, 0x6b}},
+        {0xa62f10, {0x3f, 0x04, 0x00, 0x31, 0x80, 0x01, 0x00, 0x54, 0xe8, 0x03, 0x1f, 0xaa, 0x09, 0xa0, 0x07, 0x91}},
+        {0xa58a40, {0xf5, 0x0f, 0x1d, 0xf8, 0xf4, 0x4f, 0x01, 0xa9, 0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91}},
+        {0x65b8d0, {0x28, 0x00, 0x00, 0x12, 0x08, 0x60, 0x01, 0x39, 0xc0, 0x03, 0x5f, 0xd6, 0x00, 0x00, 0x00, 0x00}},
+        {0xae5bf0, {0xfc, 0x6f, 0xba, 0xa9, 0xfa, 0x67, 0x01, 0xa9, 0xf8, 0x5f, 0x02, 0xa9, 0xf6, 0x57, 0x03, 0xa9}},
+        {0xaf3170, {0xf5, 0x0f, 0x1d, 0xf8, 0xf4, 0x4f, 0x01, 0xa9, 0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91}},
+        {0xa661a0, {0xe9, 0x03, 0x1f, 0xaa, 0x08, 0x44, 0x07, 0x91, 0x0a, 0x71, 0xc1, 0x78, 0x5f, 0x01, 0x01, 0x6b}},
+        {0xa654f0, {0xf3, 0x0f, 0x1e, 0xf8, 0xfd, 0x7b, 0x01, 0xa9, 0xfd, 0x43, 0x00, 0x91, 0xf3, 0x03, 0x01, 0x2a}},
+        {0xac02c0, {0x08, 0x08, 0x40, 0xf9, 0xa8, 0x00, 0x00, 0xb4, 0x08, 0xb1, 0x41, 0x39, 0x1f, 0x01, 0x00, 0x71}},
+        {0x4e2108, {0xc8, 0xb5, 0x00, 0x90, 0x08, 0xed, 0x46, 0xf9, 0x00, 0x01, 0x40, 0xf9, 0xc0, 0x03, 0x5f, 0xd6}},
+    };
+    bool fns_ok = true;
+    for (const auto& f : kBotFns)
+        if (!bytes_match(f.a, f.fp, sizeof(f.fp))) {
+            fns_ok = false;
+            logw("[bots] function 0x%llx fingerprint mismatch", static_cast<unsigned long long>(f.a));
+        }
+    g_sink_ok = bytes_match(0x8cff28, kBotFns[0].fp, 16);
+    int fh = 0;
+    if (fns_ok) {
+        static const unsigned char fpH1[16] = {0xf4, 0x4f, 0xbe, 0xa9, 0xfd, 0x7b, 0x01, 0xa9,
+                                               0xfd, 0x43, 0x00, 0x91, 0xf4, 0x03, 0x01, 0x2a};
+        static const unsigned char fpH2[16] = {0xf4, 0x4f, 0xbe, 0xa9, 0xfd, 0x7b, 0x01, 0xa9,
+                                               0xfd, 0x43, 0x00, 0x91, 0xf3, 0x03, 0x01, 0x2a};
+        static const unsigned char fpH3[16] = {0xf6, 0x57, 0xbd, 0xa9, 0xf4, 0x4f, 0x01, 0xa9,
+                                               0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91};
+        static const unsigned char fpH5[16] = {0x08, 0xc0, 0x21, 0x8b, 0xe9, 0x03, 0x00, 0x32,
+                                               0x09, 0x31, 0x03, 0x39, 0xc0, 0x03, 0x5f, 0xd6};
+        static const unsigned char fpH4[16] = {0xf5, 0x0f, 0x1d, 0xf8, 0xf4, 0x4f, 0x01, 0xa9,
+                                               0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91};
+        fh += install_filter_hook("H1 stream 0xb20518", 0xb20518, fpH1, reinterpret_cast<void*>(&mc5_h1_stream));
+        fh += install_filter_hook("H2 stream 0xb2a560", 0xb2a560, fpH2, reinterpret_cast<void*>(&mc5_h2_stream));
+        fh += install_filter_hook("H3 peerfree 0x8cc990", 0x8cc990, fpH3, reinterpret_cast<void*>(&mc5_h3_peerfree));
+        fh += install_filter_hook("H5 hoststate 0xb04800", 0xb04800, fpH5, reinterpret_cast<void*>(&mc5_h5_hoststate));
+        fh += install_filter_hook("H4 e5fwd 0xaf9000", 0xaf9000, fpH4, reinterpret_cast<void*>(&mc5_h4_e5));
+    }
+    g_bots_ok = fns_ok && g_sink_ok && fh >= 4; // H1,H2,H3,H5 required; H4 optional
+    logi("[bots] peerless support: functions %s, %d/5 filter hooks -> %s", fns_ok ? "ok" : "MISMATCH", fh,
+         g_bots_ok ? "ready" : "disabled (legacy fill)");
     return n;
 }
 

@@ -102,7 +102,12 @@ if(NOT ANDROID)
   target_include_directories(test_diag PRIVATE ${CMAKE_SOURCE_DIR})
   target_link_libraries(test_diag PRIVATE Threads::Threads)
 
+  # Filter-hook trampoline builder (header-only; encodings verified on the host).
+  add_executable(test_filter_tramp tests/test_filter_tramp.cpp)
+  target_include_directories(test_filter_tramp PRIVATE ${CMAKE_SOURCE_DIR})
+
   add_test(NAME json COMMAND test_json)
+  add_test(NAME filter_tramp COMMAND test_filter_tramp)
   add_test(NAME router COMMAND test_router)
   add_test(NAME anubis COMMAND test_anubis)
   add_test(NAME progress COMMAND test_progress)
