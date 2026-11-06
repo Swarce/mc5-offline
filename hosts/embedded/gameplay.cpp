@@ -52,6 +52,7 @@ void* g_pushed_st = nullptr;  // our MultiplayerStartLocalGame state (game threa
 int g_pushed_frames = 0;
 long g_dump_next_ms = 0;       // match-state diagnostic throttle (game thread only)
 int g_dump_left = 0;
+bool g_localfix_done = false;  // local player converted from host/spectator to participant
 // Bots for the running local match: re-asserted on every bot tick (game thread).
 std::atomic<int> g_bot_target{0};
 std::atomic<bool> g_local_active{false}; // a local match we started is (being) hosted
@@ -208,6 +209,7 @@ void start_bot_match_now(int bots) {
     g_pushed_frames = 0;
     g_dump_left = 15; // dump match state once/second for the first 15 s (diagnostic)
     g_dump_next_ms = 0;
+    g_localfix_done = false;
     logi("[botmatch] local match state pushed (MP=0x%llx, top=%p); %d bots will be requested when the match's "
          "bot manager appears", static_cast<unsigned long long>(m), top, bots);
 }
@@ -485,6 +487,34 @@ void dump_match_state(uintptr_t MP) {
     }
 }
 
+// The host registers its own player with state 4 (ae3a70 -> AddPlayer state=4), which is
+// a spectator/host, not a spawning participant -- so the local view is the free host
+// camera (black / in the void) while the HUD draws and real players (bots) spawn and move.
+// Once the match is live and the local slot object exists, convert the local player into a
+// normal teamed participant (state 1, a team, ready) so the round spawns its soldier and
+// attaches the first-person camera, exactly as for a joined player. Guarded; runs once.
+void ensure_local_participant(uintptr_t MP) {
+    if (g_localfix_done || !g_bots_ok) return;
+    if (!authority_ok(MP)) return;
+    std::int32_t lid = -1;
+    if (!rdv(MP + 0x15d0, lid) || lid < 0 || lid > 0x7f) return;
+    void* ep = reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa62f58)(reinterpret_cast<void*>(MP), lid);
+    if (!ep) return;
+    uintptr_t e = reinterpret_cast<uintptr_t>(ep);
+    unsigned char st = 0;
+    if (!rdv(e + 0x1b, st)) return;
+    if (st != 4) { g_localfix_done = true; return; } // already a normal participant; nothing to do
+    void* so = reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa58a40)(reinterpret_cast<void*>(MP), lid);
+    if (!so) return; // slot object not created yet; retry next frame
+    *reinterpret_cast<volatile unsigned char*>(e + 0x1b) = 1; // state: playing
+    int team = reinterpret_cast<int (*)(void*, int)>(g_base + 0xaf1030)(reinterpret_cast<void*>(MP), lid); // ChooseTeam
+    reinterpret_cast<void (*)(void*, int)>(g_base + 0xaf1748)(so, team);                                   // apply team
+    *reinterpret_cast<volatile std::int32_t*>(reinterpret_cast<uintptr_t>(so) + 0x708) = 3;                // ready
+    reinterpret_cast<void (*)(void*)>(g_base + 0xaf3170)(reinterpret_cast<void*>(MP));                     // CanStart map
+    g_localfix_done = true;
+    logi("[match] local player: host entry state 4 -> 1, team=%d, marked ready (was the spectator host cam)", team);
+}
+
 // Mission start 0x799210 (MP branch looks the local player up by id): repair first.
 extern "C" void mc5_mission_start_hook(const char*, unsigned long long, unsigned long long, unsigned long long,
                                        unsigned long long) {
@@ -604,7 +634,11 @@ extern "C" void mc5_pump_hook(const char*, unsigned long long, unsigned long lon
     if (g_local_active.load()) {
         repair_host_entry("frame");
         void* mp = reinterpret_cast<void* (*)()>(g_base + 0x4e2108)();
-        if (mp) dump_match_state(reinterpret_cast<uintptr_t>(mp));
+        if (mp) {
+            try { ensure_local_participant(reinterpret_cast<uintptr_t>(mp)); }
+            catch (...) { logw("[match] exception making the local player a participant (ignored)"); }
+            dump_match_state(reinterpret_cast<uintptr_t>(mp));
+        }
     }
     if (g_qp.active && g_qp.fire) {
         g_qp.active = false;
@@ -732,6 +766,8 @@ int install() {
         {0x65b8d0, {0x28, 0x00, 0x00, 0x12, 0x08, 0x60, 0x01, 0x39, 0xc0, 0x03, 0x5f, 0xd6, 0x00, 0x00, 0x00, 0x00}},
         {0xae5bf0, {0xfc, 0x6f, 0xba, 0xa9, 0xfa, 0x67, 0x01, 0xa9, 0xf8, 0x5f, 0x02, 0xa9, 0xf6, 0x57, 0x03, 0xa9}},
         {0xaf3170, {0xf5, 0x0f, 0x1d, 0xf8, 0xf4, 0x4f, 0x01, 0xa9, 0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91}},
+        {0xaf1030, {0xff, 0x83, 0x02, 0xd1, 0xfc, 0x6f, 0x04, 0xa9, 0xfa, 0x67, 0x05, 0xa9, 0xf8, 0x5f, 0x06, 0xa9}},
+        {0xaf1748, {0xff, 0x43, 0x01, 0xd1, 0xf5, 0x13, 0x00, 0xf9, 0xf4, 0x4f, 0x03, 0xa9, 0xfd, 0x7b, 0x04, 0xa9}},
         {0xa661a0, {0xe9, 0x03, 0x1f, 0xaa, 0x08, 0x44, 0x07, 0x91, 0x0a, 0x71, 0xc1, 0x78, 0x5f, 0x01, 0x01, 0x6b}},
         {0xa654f0, {0xf3, 0x0f, 0x1e, 0xf8, 0xfd, 0x7b, 0x01, 0xa9, 0xfd, 0x43, 0x00, 0x91, 0xf3, 0x03, 0x01, 0x2a}},
         {0xac02c0, {0x08, 0x08, 0x40, 0xf9, 0xa8, 0x00, 0x00, 0xb4, 0x08, 0xb1, 0x41, 0x39, 0x1f, 0x01, 0x00, 0x71}},
