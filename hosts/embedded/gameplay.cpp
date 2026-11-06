@@ -511,11 +511,19 @@ void ensure_playable(uintptr_t MP) {
     if (g_spawn_done || !g_realplay_ok || !authority_ok(MP)) return;
     std::int32_t lid = -1;
     if (!rdv(MP + 0x15d0, lid) || lid < 0) return;
-    if ((reinterpret_cast<int (*)(void*)>(g_base + 0x5be670)(reinterpret_cast<void*>(MP)) & 1) == 0)
-        return; // phase gate not in-match yet; the builder would pick a loadout-less state
+    // Wait until bots exist (the match is live) before spawning the local player.
+    if (g_inj.empty()) return;
     void* ctx = reinterpret_cast<void* (*)()>(g_base + 0x511a68)();
     if (!ctx) return;
+    // The builder 0x5be1c8 picks the in-match soldier state 0x14726d (loadout + camera) only
+    // when its gate 0x5be670 is true, i.e. MP+0x1878 == 10. Our local-host match never sets
+    // that phase, so force it to 10 just around the one call, then restore it (the field is
+    // read only by the gate; we are on the game thread, so nothing else races it).
+    std::int32_t saved_phase = 0;
+    bool have_phase = rdv(MP + 0x1878, saved_phase);
+    if (have_phase) *reinterpret_cast<volatile std::int32_t*>(MP + 0x1878) = 10;
     reinterpret_cast<void (*)(void*, int, int)>(g_base + 0x5be1c8)(ctx, lid, lid + 1); // engine local spawn
+    if (have_phase) *reinterpret_cast<volatile std::int32_t*>(MP + 0x1878) = saved_phase;
     auto set_ready = [&](int id) {
         void* so = reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa58a40)(reinterpret_cast<void*>(MP), id);
         if (so) reinterpret_cast<void (*)(void*, int)>(g_base + 0x4f5428)(so, 3); // slotobj+0x708 = 3
