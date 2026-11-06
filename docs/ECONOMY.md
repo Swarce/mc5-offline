@@ -100,7 +100,9 @@ over the internet.
   that mode.
 * You are the host, and every other slot is filled with AI bots. Teams are balanced by the game.
 * Battle Royale is not hosted offline.
-* Settings: `bots.quickPlay` (on/off), `bots.searchSecondsMin` / `bots.searchSecondsMax`.
+* Settings: `bots.quickPlay` (on/off), `bots.searchSecondsMin` / `bots.searchSecondsMax`, `bots.peerless`
+  (on by default — the connection-less fill that lets every slot hold a bot; set it to `false` to fall back to the
+  old behaviour, which seats at most one bot).
 
 **Campaign zones** open the way they did online. Once you have finished every story mission of a zone, the next
 zone unlocks when you return to the menu. The server reads the zone and mission list from your own game data.

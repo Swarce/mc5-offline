@@ -32,9 +32,23 @@ zone-table offsets (`0x8e2810`, `0x8e2d60`, `0x64f5f8`, `0x5c2d30`, `0x4f85b0`),
 * **Local bot match (experimental).** `BOTMATCH` queues the game's own debug sequence for option 0xa0 on the game
   thread. The 132 bytes at `0x8edd64` are fingerprinted, and `*(MP+0xb338)+0x110` is pre-checked. The state is
   "MultiplayerStartLocalGame" (`0x837588`), which makes this client the authority.
-  * A hook on the bot tick `0xb083a8` then sets `bm+0x58` = `bots.count` and `bm+3` = 1 for the new bot
-    manager.
-  * Whether type-0 bots move or shoot is unverified (spec §C3).
+* **Peerless bot fill (experimental; `bots.peerless`, default on).** Quick Play and `BOTMATCH` fill the hosted
+  match with bots that hold no connection, so every slot can be filled (the connection has one peer slot, taken by
+  the host — see §B). Each bot is added straight to the player table with a unique negative connection-slot
+  sentinel (−2, −3, …), the slot object is marked a bot, and the game's own `BotReady` `0xae5bf0` runs so it gets a
+  team, loadout and the ready state, all dispatched locally. One bot is injected per bot tick up to capacity−1, and
+  `bm+0x58` is kept equal to the number injected so the game's own `UpdateBotPlayers` neither adds nor churns.
+  * Five fingerprinted filter hooks (`install_filter_hook`, see `filter_tramp.hpp`) keep a negative slot harmless:
+    H1 `0xb20518` / H2 `0xb2a560` return a bit-bucket outgoing stream; H3 `0x8cc990` skips the out-of-bounds peer
+    free; H5 `0xb04800` skips the `MP[0xcc+slot]` host-state write; H4 `0xaf9000` drops the by-id 0xe5 forward.
+    All five are strictly safety-improving even for non-bot calls (they turn a NULL deref or an out-of-bounds index
+    into a no-op).
+  * Every game function the injector calls is fingerprinted at `install()`; any mismatch leaves `g_bots_ok` false
+    and the bot tick falls back to the legacy single-bot fill below.
+  * Legacy fill (`bots.peerless` = false): the bot tick `0xb083a8` sets `bm+0x58` = `bots.count` and `bm+3` = 1;
+    the game's own `AddBot` seats at most one bot on a hosted match.
+  * Not yet run on a device. Known open risks: in team modes `UpdateBotPlayers` may try to kick "excess" bots, which
+    is a safe no-op (H3) but churns; the scoreboard name source is unverified; bot ping is cosmetic garbage.
 * **Quick Play** (`automatch/quickplay*`) answers `[]`. Offline there are no dedicated game servers, and a joined
   client is never the authority.
 * **Review hardening** (wf `mc5-m4-review`, each finding adversarially verified):

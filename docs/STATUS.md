@@ -2,6 +2,18 @@
 
 Device-test history and the current state. Newest first.
 
+## November 2026: M4, peerless bot fill (host-verified; device round pending)
+
+* **Bots join a hosted Quick Play / `BOTMATCH` match.** The hosted connection has one peer slot (the host's), so the
+  game's own `AddBot` could seat at most one bot. The new `bots.peerless` path (default on) adds each bot straight to
+  the player table with a negative connection-slot sentinel and runs the game's own `BotReady`, filling every slot.
+  Five fingerprinted filter hooks make the negative slot harmless (they also turn pre-existing NULL/out-of-bounds
+  cases into no-ops). See [research/06 §0](research/06-zones-cheats-bots.md) and `hosts/embedded/filter_tramp.hpp`.
+* **Steam build files.** The player supplied the Windows `mc5.exe`/`.iobj`/`.ipdb`; they are a linker cache with no
+  game symbols and only confirm a few names. Kept out of the repo. See [research/07](research/07-steam-build.md).
+* **Tests.** 8 host suites pass (added `filter_tramp`, which checks the hook trampoline encodings). The arm64 `.so`
+  builds. None of the bot path has run on a device yet; every address is fingerprinted and falls back on a mismatch.
+
 ## November 2026: M2, progression and unlock codes (host-verified; next device round pending)
 
 * Device round d86ee5c: the age gate passes, the tutorial and the second mission play, and the menu is reached.
