@@ -485,15 +485,24 @@ void dump_match_state(uintptr_t MP) {
     int canstart = reinterpret_cast<int (*)(void*, int)>(g_base + 0xb083f8)(reinterpret_cast<void*>(MP), 0) & 1;
     uintptr_t bm = 0; std::int32_t bm58 = -1;
     if (rdv(MP + 0xb340, bm) && bm >= 0x1000) rdv(bm + 0x58, bm58);
-    logi("[match] c4=%u canStart=%d localId=%d entry{state=%d team=%d slot=%d} soldier=%s ready=%d bots=%d bm58=%d ticks=%d",
-         phase, canstart, lid, st, team, slot, so ? "yes" : "no", ready, static_cast<int>(g_inj.size()), bm58,
-         g_bottick_n.load());
+    // Entity internals: +0xb0 = current ECS state key, +0x4d0 = loadout component ptr. For a
+    // working bot these reveal which state actually carries a loadout in our match context.
+    auto ent_info = [&](void* e, std::int32_t& s, uintptr_t& lo) {
+        s = -1; lo = 0;
+        if (e) { rdv(reinterpret_cast<uintptr_t>(e) + 0xb0, s); rdv(reinterpret_cast<uintptr_t>(e) + 0x4d0, lo); }
+    };
+    std::int32_t lstate = -1; uintptr_t lload = 0; ent_info(so, lstate, lload);
+    logi("[match] c4=%u canStart=%d localId=%d entry{state=%d team=%d slot=%d} soldier=%s ready=%d ecsState=0x%x loadout=%s bots=%d bm58=%d ticks=%d",
+         phase, canstart, lid, st, team, slot, so ? "yes" : "no", ready, static_cast<unsigned>(lstate),
+         lload ? "ok" : "null", static_cast<int>(g_inj.size()), bm58, g_bottick_n.load());
     for (const auto& b : g_inj) {
         void* bso = reinterpret_cast<void* (*)(void*, int)>(g_base + 0xa58a40)(reinterpret_cast<void*>(MP), b.id);
         int br = reinterpret_cast<int (*)(void*, int)>(g_base + 0xa654f0)(reinterpret_cast<void*>(MP), b.id) & 1;
         int bt = -1;
         if (bso) { int t = reinterpret_cast<int (*)(void*)>(g_base + 0x5bb930)(bso); bt = t; }
-        logi("[match]   bot id=%d slot=%d soldier=%s ready=%d team=%d", b.id, b.slot, bso ? "yes" : "no", br, bt);
+        std::int32_t bstate = -1; uintptr_t bload = 0; ent_info(bso, bstate, bload);
+        logi("[match]   bot id=%d slot=%d soldier=%s ready=%d team=%d ecsState=0x%x loadout=%s", b.id, b.slot,
+             bso ? "yes" : "no", br, bt, static_cast<unsigned>(bstate), bload ? "ok" : "null");
     }
 }
 
